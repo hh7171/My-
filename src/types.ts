@@ -1,0 +1,187 @@
+export type Category =
+  | 'top'
+  | 'bottom'
+  | 'outer'
+  | 'shoes'
+  | 'bag'
+  | 'hat'
+  | 'scarf'
+  | 'necklace'
+  | 'watch'
+  | 'belt'
+export type BodyType = 'straight' | 'pear' | 'hourglass' | 'apple'
+export type GarmentStatus = 'owned' | 'wishlist'
+export type Season = 'spring' | 'summer' | 'winter'
+export type LookMode = 'closet' | 'tryon'
+export type View = 'home' | 'account' | 'body' | 'closet' | 'wishlist' | 'looks'
+
+export type Account = {
+  id: string
+  name: string
+  phone: string
+  avatarBlob: Blob
+  createdAt: number
+}
+
+export type Point = { x: number; y: number }
+
+export type BodyMarks = {
+  nose: Point
+  neck: Point
+  lShoulder: Point
+  rShoulder: Point
+  lElbow: Point
+  rElbow: Point
+  lWrist: Point
+  rWrist: Point
+  lHip: Point
+  rHip: Point
+  lKnee: Point
+  rKnee: Point
+  lAnkle: Point
+  rAnkle: Point
+}
+
+export type Adjustments = {
+  shoulder: number
+  waist: number
+  hip: number
+  leg: number
+}
+
+export type BodyProfile = {
+  heightCm: number
+  weightKg: number
+  bodyType: BodyType
+  adjustments: Adjustments
+  sourceBlob: Blob
+  normalizedBlob: Blob
+  normalizedMarks: BodyMarks
+  imageBlob: Blob
+  marks: BodyMarks
+  demo: boolean
+  segmented: boolean
+  posed: boolean
+  person?: boolean
+  updatedAt: number
+}
+
+export type StickerPlace = {
+  dx: number
+  dy: number
+  scale: number
+}
+
+export type StickerFrame = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export type Garment = {
+  id: string
+  userId?: string
+  name: string
+  category: Category
+  status: GarmentStatus
+  season?: Season
+  cutoutBlob: Blob
+  originalBlob?: Blob
+  color: string
+  stickerBlob?: Blob
+  stickerFor?: number
+  stickerVer?: number
+  stickerPlace?: StickerPlace
+  stickerFrame?: StickerFrame
+  createdAt: number
+}
+
+export const STICKER_VERSION = 15
+
+export function modelGarmentBlob(item: { cutoutBlob: Blob }): Blob {
+  return item.cutoutBlob
+}
+
+export function stickerVersionFor(category: Category): number {
+  void category
+  return STICKER_VERSION
+}
+
+export function stickerAligned(
+  item: { stickerBlob?: Blob; stickerFor?: number },
+  updatedAt: number,
+): boolean {
+  return Boolean(item.stickerBlob) && item.stickerFor === updatedAt
+}
+
+export function stickerCurrent(
+  item: { stickerBlob?: Blob; stickerFor?: number; stickerVer?: number; category?: Category },
+  updatedAt: number,
+): boolean {
+  if (!stickerAligned(item, updatedAt)) return false
+  return item.stickerVer === stickerVersionFor(item.category ?? 'top')
+}
+
+export type Look = {
+  id: string
+  userId?: string
+  mode: LookMode
+  garmentIds: string[]
+  imageBlob: Blob
+  createdAt: number
+}
+
+export const CATEGORY_ORDER: Category[] = [
+  'top',
+  'bottom',
+  'outer',
+  'shoes',
+  'bag',
+  'hat',
+  'scarf',
+  'necklace',
+  'watch',
+  'belt',
+]
+
+export const REQUIRED_SLOTS: Category[] = ['top', 'bottom']
+
+export const CATEGORY_LABEL: Record<Category, string> = {
+  top: '上衣',
+  bottom: '下装',
+  outer: '外套',
+  shoes: '鞋子',
+  bag: '包',
+  hat: '帽子',
+  scarf: '围巾',
+  necklace: '项链',
+  watch: '手表/手链',
+  belt: '腰带',
+}
+
+export const CLOTHING_ORDER: Category[] = ['top', 'bottom', 'outer', 'shoes']
+
+export const ACCESSORY_ORDER: Category[] = ['bag', 'hat', 'scarf', 'necklace', 'watch', 'belt']
+
+export const SEASON_ORDER: Season[] = ['spring', 'summer', 'winter']
+
+export const SEASON_LABEL: Record<Season, string> = {
+  spring: '春秋装',
+  summer: '夏装',
+  winter: '冬装',
+}
+
+export const BODY_LABEL: Record<BodyType, string> = {
+  straight: '直筒',
+  pear: '梨形',
+  hourglass: '沙漏',
+  apple: '苹果形',
+}
+
+export const ZERO_ADJUSTMENTS: Adjustments = {
+  shoulder: 0,
+  waist: 0,
+  hip: 0,
+  leg: 0,
+}
