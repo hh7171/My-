@@ -607,11 +607,12 @@ input[type="range"] { width: 100%; accent-color: var(--seal); }
 }
 .card-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 4px 8px;
   margin: 0 12px 12px;
 }
-.card-actions .text-button { margin: 0; }
+.card-actions .text-button { margin: 0; white-space: nowrap; }
 .mix-picks {
   display: flex;
   gap: 8px;
@@ -671,6 +672,10 @@ input[type="range"] { width: 100%; accent-color: var(--seal); }
   padding: 7px 12px;
 }
 .chip.selected { border-color: var(--ink); background: var(--paper); }
+.chip.drop-target { border-style: dashed; }
+.chip.drop-over { border-color: var(--ink); background: var(--paper); }
+.rail-pick[draggable='true'] { cursor: grab; }
+.rail-pick img { -webkit-user-drag: none; }
 .count { color: var(--muted); margin-left: auto; }
 
 .grid, .look-grid {

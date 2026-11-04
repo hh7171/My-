@@ -4,9 +4,16 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, join, resolve, sep } from 'node:path'
 import { isGarmentDir } from './src/garment-name.ts'
 import {
+  applyStickerNote,
+  formatStickerNote,
+  frameFitsImage,
   imageType,
   isLibraryId,
   markOf,
+  parseStickerNote,
+  readPngSize,
+  readStickerFrame,
+  stickerNoteFromRecord,
   storageId,
   LIBRARY_BLOBS,
   LIBRARY_REQUIRED,
@@ -14,6 +21,7 @@ import {
   type LibraryIndex,
   type LibraryKind,
   type LibraryWriteResult,
+  type PngStickerFrame,
   type StoredRecord,
 } from './src/library-mark.ts'
 
@@ -163,6 +171,7 @@ export function createLibrary(root: string): LibraryStore {
     const stored: StoredRecord = { savedAt, record: stripBlobs(input.record), blobs }
     assign(index, input.kind, id, stored)
     clearTombstone(index, input.kind, id)
+    if (input.kind === 'garment') await writeStickerNote(id, stored.record, Boolean(blobs.sticker))
     await saveIndex(index)
     return { ok: true, savedAt }
   }
@@ -207,7 +216,36 @@ export function createLibrary(root: string): LibraryStore {
     return null
   }
 
-  function clearStickerRecord(record: Record<string, unknown>) {
+  function readRecordFrame(value: unknown): PngStickerFrame | null {
+  if (!value || typeof value !== 'object') return null
+  const frame = value as Partial<PngStickerFrame>
+  if (typeof frame.x !== 'number' || typeof frame.y !== 'number' || typeof frame.width !== 'number' || typeof frame.height !== 'number') return null
+  return { x: frame.x, y: frame.y, width: frame.width, height: frame.height }
+}
+
+function frameFromTwin(index: LibraryIndex, selfId: string, mark: string, size: { width: number; height: number }): PngStickerFrame | null {
+  for (const [id, stored] of Object.entries(index.garments)) {
+    if (id === selfId || stored.blobs.sticker?.mark !== mark) continue
+    const frame = readRecordFrame(stored.record.stickerFrame)
+    if (frame && frameFitsImage(frame, size.width, size.height)) return frame
+  }
+  return null
+}
+
+function restoreStickerFrame(index: LibraryIndex, selfId: string, bytes: Uint8Array, mark: string): boolean {
+  const stored = index.garments[selfId]
+  const size = readPngSize(bytes)
+  if (!stored || !size) return false
+  const current = readRecordFrame(stored.record.stickerFrame)
+  if (current && frameFitsImage(current, size.width, size.height)) return false
+  const embedded = readStickerFrame(bytes)
+  const recovered = embedded && frameFitsImage(embedded, size.width, size.height) ? embedded : frameFromTwin(index, selfId, mark, size)
+  if (!recovered) return false
+  stored.record.stickerFrame = recovered
+  return true
+}
+
+function clearStickerRecord(record: Record<string, unknown>) {
     delete record.stickerFrame
     delete record.stickerPlace
     delete record.stickerFor
@@ -216,6 +254,7 @@ export function createLibrary(root: string): LibraryStore {
 
   async function adoptGarmentStickers(index: LibraryIndex): Promise<boolean> {
     let changed = false
+    const bodySize = await bodyImageSize(index)
     for (const [id, stored] of Object.entries(index.garments)) {
       const found = await findStickerFile(id, stored)
       const current = stored.blobs.sticker
@@ -229,14 +268,78 @@ export function createLibrary(root: string): LibraryStore {
       }
       const type = imageType(found.bytes, '')
       const mark = markOf(found.bytes, type)
-      if (current && current.file === found.relative && current.bytes === found.bytes.length && current.mark === mark) continue
-      stored.blobs.sticker = { type, file: found.relative, bytes: found.bytes.length, mark }
-      clearStickerRecord(stored.record)
-      stored.record.stickerVer = 6
-      stored.savedAt = Date.now()
-      changed = true
+      const unchanged = current && current.file === found.relative && current.bytes === found.bytes.length && current.mark === mark
+      if (!unchanged) {
+        stored.blobs.sticker = { type, file: found.relative, bytes: found.bytes.length, mark }
+        clearStickerRecord(stored.record)
+        const bodyUpdated = index.body?.record.updatedAt
+        if (typeof bodyUpdated === 'number') stored.record.stickerFor = bodyUpdated
+        stored.savedAt = Date.now()
+        changed = true
+      }
+      const size = readPngSize(found.bytes)
+      const currentFrame = readRecordFrame(stored.record.stickerFrame)
+      const trusted = Boolean(size && currentFrame && frameFitsImage(currentFrame, size.width, size.height))
+      const noted = trusted ? null : await readStickerNote(id, stored.record)
+      if (!trusted && size && noted && frameFitsImage(noted.frame, size.width, size.height) && applyStickerNote(stored.record, noted)) {
+        stored.savedAt = Date.now()
+        changed = true
+      } else if (!trusted && restoreStickerFrame(index, id, found.bytes, mark)) {
+        stored.savedAt = Date.now()
+        changed = true
+      } else if (!trusted && size && bodySize && size.width === bodySize.width && size.height === bodySize.height) {
+        stored.record.stickerFrame = { x: 0, y: 0, width: size.width, height: size.height }
+        stored.savedAt = Date.now()
+        changed = true
+      }
+      await writeStickerNote(id, stored.record, true)
     }
     return changed
+  }
+
+  function garmentNotePath(id: string, record: Record<string, unknown>): string {
+    const dir = garmentStorageDir(record, id)
+    if (!isGarmentDir(dir) && !isLibraryId(dir)) throw new Error('路径不对')
+    const full = resolve(root, 'files', 'garments', dir, 'sticker.json')
+    const base = resolve(root, 'files', 'garments')
+    if (full !== base && !full.startsWith(base + sep)) throw new Error('路径不对')
+    return full
+  }
+
+  async function bodyImageSize(index: LibraryIndex): Promise<{ width: number; height: number } | null> {
+    const file = index.body?.blobs.image?.file
+    if (!file) return null
+    try {
+      return readPngSize(await readFile(inside(file)))
+    } catch {
+      return null
+    }
+  }
+
+  async function readStickerNote(id: string, record: Record<string, unknown>) {
+    try {
+      return parseStickerNote(await readFile(garmentNotePath(id, record), 'utf8'))
+    } catch {
+      return null
+    }
+  }
+
+  async function writeStickerNote(id: string, record: Record<string, unknown>, hasSticker: boolean): Promise<boolean> {
+    const path = garmentNotePath(id, record)
+    const note = hasSticker ? stickerNoteFromRecord(record) : null
+    if (!note) {
+      await rm(path, { force: true })
+      return false
+    }
+    const text = formatStickerNote(note)
+    try {
+      if ((await readFile(path, 'utf8')) === text) return false
+    } catch {
+      /* 目录里还没有这张位置记录 */
+    }
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, text)
+    return true
   }
 
   async function loadIndex(): Promise<LibraryIndex> {

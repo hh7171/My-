@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type DragEvent } from 'react'
 import { AdjustNote, BlobImg } from '../components.tsx'
-import { blobToCanvas, compositeLook, dominantColor, stickerLayer, type StickerFrame } from '../imaging.ts'
+import { blobToCanvas, compositeLook, dominantColor, isolateProductCutout, stickerLayer, type StickerFrame } from '../imaging.ts'
 import { useWardrobe } from '../store.tsx'
 import {
   ACCESSORY_ORDER,
@@ -8,6 +8,7 @@ import {
   CATEGORY_LABEL,
   CATEGORY_ORDER,
   CLOTHING_ORDER,
+  canMakeOutfit,
   SEASON_LABEL,
   SEASON_ORDER,
   stickerAligned,
@@ -17,12 +18,12 @@ import {
   type Garment,
   type Season,
 } from '../types.ts'
-import { addedOrder, garmentLabel, nextGarmentName } from '../garment-name.ts'
+import { addedOrder, garmentLabel, isClothingCategory, nextGarmentName, relocatedGarmentName } from '../garment-name.ts'
 import { maxGarments } from '../model-config.ts'
 import { generateFlatLay, generateGarmentSticker, generateWearPhoto, wearError, type WearPiece } from '../wear.ts'
 
 const stickerInflight = new Set<string>()
-const STACK: Category[] = ['shoes', 'bottom', 'top', 'belt', 'outer', 'scarf', 'necklace', 'hat', 'watch', 'bag']
+const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'outer', 'scarf', 'jewelry', 'hat', 'glasses', 'bag']
 
 type Shelf = Season | 'accessory'
 type Nudge = { dx: number; dy: number; scale: number }
@@ -51,6 +52,8 @@ function slotsFor(shelf: Shelf): Category[] {
 export function ClosetPage() {
   const { body, garments, addGarment, updateGarment, deleteGarment, addLook, notify, setNav } = useWardrobe()
   const [shelf, setShelf] = useState<Shelf>('summer')
+  const [dragging, setDragging] = useState(false)
+  const [dropSeason, setDropSeason] = useState<Season | null>(null)
   const [name, setName] = useState('')
   const [category, setCategory] = useState<Category>('top')
   const [pending, setPending] = useState<{ originalBlob: Blob; flatLay: boolean } | null>(null)
@@ -65,7 +68,7 @@ export function ClosetPage() {
   const [note, setNote] = useState('')
   const [preview, setPreview] = useState<Blob | null>(null)
   const [sticking, setSticking] = useState<string | null>(null)
-  const [stickerError, setStickerError] = useState('')
+  const [stickerError, setStickerError] = useState<{ id: string; text: string } | null>(null)
   const [layers, setLayers] = useState<StickerLayer[]>([])
   const [nudges, setNudges] = useState<Record<string, Nudge>>({})
   const [activeSticker, setActiveSticker] = useState<string | null>(null)
@@ -77,6 +80,8 @@ export function ClosetPage() {
   const layerUrls = useRef<string[]>([])
   const nudgesRef = useRef(nudges)
   const saveTimer = useRef(0)
+  const cardDragged = useRef(false)
+  const chipDropped = useRef(false)
   nudgesRef.current = nudges
   bodyRef.current = body
   garmentsRef.current = garments
@@ -93,14 +98,12 @@ export function ClosetPage() {
     const item = owned.find((garment) => garment.id === picked[slot] && garment.category === slot)
     return item ? [item] : []
   })
-  const top = chosen.find((item) => item.category === 'top')
-  const bottom = chosen.find((item) => item.category === 'bottom')
   const currentIds = chosen.map((item) => item.id)
   const sameOutfit = currentIds.length === madeFrom.length && currentIds.every((id, index) => id === madeFrom[index])
+  const outfitReady = canMakeOutfit(chosen.map((item) => item.category))
   const canGenerate = Boolean(
     body?.person &&
-      top &&
-      bottom &&
+      outfitReady &&
       chosen.length <= maxGarments() &&
       !making &&
       chosen.every((item) => stickerAligned(item, body.updatedAt)),
@@ -193,6 +196,7 @@ export function ClosetPage() {
                 stickerBlob: laid.png,
                 stickerFrame: laid.frame,
                 stickerPlace: place,
+                ...(item.stickerFor == null ? { stickerFor: body.updatedAt } : {}),
               })
             }
           }
@@ -224,11 +228,20 @@ export function ClosetPage() {
   }, [stickerKey, body])
 
   useEffect(() => {
-    setActiveSticker((current) => {
-      if (current && layers.some((layer) => layer.id === current)) return current
-      return layers.at(-1)?.id ?? null
-    })
+    setActiveSticker((current) => (current && layers.some((layer) => layer.id === current) ? current : null))
   }, [layers])
+
+  useEffect(() => {
+    if (!activeSticker) return
+    const dismiss = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      if (target.closest('.sticker-layer, .sticker-tools, .sticker-handle')) return
+      setActiveSticker(null)
+    }
+    window.addEventListener('pointerdown', dismiss)
+    return () => window.removeEventListener('pointerdown', dismiss)
+  }, [activeSticker])
 
   useEffect(
     () => () => {
@@ -349,9 +362,38 @@ export function ClosetPage() {
   }
 
   function openShelf(next: Shelf) {
+    if (chipDropped.current) return
     setShelf(next)
     const nextSlots = slotsFor(next)
     setCategory((current) => (nextSlots.includes(current) ? current : nextSlots[0]))
+  }
+
+  function beginDrag(event: DragEvent, item: Garment) {
+    if (!isClothingCategory(item.category) || shelf === 'accessory') return
+    cardDragged.current = true
+    setDragging(true)
+    event.dataTransfer.setData('text/plain', item.id)
+    event.dataTransfer.effectAllowed = 'move'
+  }
+
+  function endDrag() {
+    setDragging(false)
+    setDropSeason(null)
+    window.setTimeout(() => {
+      cardDragged.current = false
+    }, 80)
+  }
+
+  async function moveToSeason(id: string, season: Season) {
+    const item = garmentsRef.current.find((garment) => garment.id === id && garment.status === 'owned')
+    if (!item) return
+    const name = relocatedGarmentName(garmentsRef.current, item, season)
+    if (!name) return
+    const moved = await updateGarment(item.id, { name, season })
+    if (!moved) return
+    setPicked((current) => (current[item.category] === item.id ? { ...current, [item.category]: undefined } : current))
+    const sameNumber = garmentLabel(item.name) === garmentLabel(moved.name)
+    notify(sameNumber ? `已放到${SEASON_LABEL[season]}` : `已放到${SEASON_LABEL[season]}，编号改为 ${garmentLabel(moved.name)}`)
   }
 
   function enqueueSticker(item: Garment, manual = false) {
@@ -377,7 +419,7 @@ export function ClosetPage() {
         if (stickerCurrent(latest, profile.updatedAt)) continue
         stickerInflight.add(latest.id)
         setSticking(latest.id)
-        setStickerError('')
+        setStickerError((current) => (current?.id === latest.id ? null : current))
         try {
           const worn = await generateGarmentSticker({
             bodyBlob: profile.imageBlob,
@@ -396,8 +438,15 @@ export function ClosetPage() {
             stickerVer: stickerVersionFor(latest.category),
             stickerPlace: place,
           })
+          setStickerError((current) => (current?.id === latest.id ? null : current))
         } catch (cause) {
-          setStickerError(wearError(cause))
+          const saved = garmentsRef.current.find((garment) => garment.id === latest.id)
+          const profileNow = bodyRef.current
+          if (saved && profileNow?.person && stickerCurrent(saved, profileNow.updatedAt)) {
+            setStickerError((current) => (current?.id === latest.id ? null : current))
+          } else {
+            setStickerError({ id: latest.id, text: `${garmentLabel(latest.name)}：${wearError(cause)}` })
+          }
         } finally {
           stickerInflight.delete(latest.id)
           setSticking(null)
@@ -409,6 +458,7 @@ export function ClosetPage() {
   }
 
   function toggle(item: Garment) {
+    if (cardDragged.current) return
     const selected = picked[item.category] === item.id
     if (!selected) enqueueSticker(item)
     setPicked((current) => ({
@@ -420,7 +470,6 @@ export function ClosetPage() {
   async function takeFile(file: File) {
     setUploadError('')
     setPending({ originalBlob: file, flatLay: false })
-    if (!name) setName(file.name.replace(/\.[^.]+$/, ''))
   }
 
   function cancel() {
@@ -451,7 +500,8 @@ export function ClosetPage() {
     let product = pending.originalBlob
     let saved: Garment
     try {
-      if (!pending.flatLay) product = await generateFlatLay({ name: label, blob: pending.originalBlob })
+      if (!pending.flatLay) product = await generateFlatLay({ category: categoryValue, name: label, blob: pending.originalBlob })
+      product = await isolateProductCutout(product)
       const color = dominantColor(await blobToCanvas(product))
       const season = shelf === 'accessory' ? undefined : shelf
       saved = await addGarment({
@@ -475,6 +525,7 @@ export function ClosetPage() {
       notify(shelf === 'accessory' ? '已放进配饰' : `已放进${SEASON_LABEL[shelf]}`)
       return
     }
+    stickerInflight.add(saved.id)
     setSticking(saved.id)
     try {
       const worn = await generateGarmentSticker({
@@ -484,7 +535,7 @@ export function ClosetPage() {
         name: label,
         marks: body.marks,
       })
-      await updateGarment(saved.id, {
+      const stored = await updateGarment(saved.id, {
         stickerBlob: worn.stickerBlob,
         stickerFrame: worn.stickerFrame,
         stickerFor: body.updatedAt,
@@ -493,13 +544,26 @@ export function ClosetPage() {
       })
       setPending(null)
       setName('')
+      setStickerError((current) => (current?.id === saved.id ? null : current))
+      if (!stored?.stickerBlob) {
+        notify('衣服已放进衣橱，贴合图层这次没做成')
+        return
+      }
       notify('已放进衣橱，贴合图层按这个人的身材做好了')
     } catch (cause) {
       setPending(null)
       setName('')
-      setUploadError(wearError(cause))
-      notify('衣服已放进衣橱，贴合图层这次没做成')
+      const savedNow = garmentsRef.current.find((garment) => garment.id === saved.id)
+      const profileNow = bodyRef.current
+      if (savedNow && profileNow?.person && stickerCurrent(savedNow, profileNow.updatedAt)) {
+        setStickerError((current) => (current?.id === saved.id ? null : current))
+        notify('已放进衣橱，贴合图层按这个人的身材做好了')
+      } else {
+        setUploadError(`${garmentLabel(saved.name)}：${wearError(cause)}`)
+        notify('衣服已放进衣橱，贴合图层这次没做成')
+      }
     } finally {
+      stickerInflight.delete(saved.id)
       setSticking(null)
     }
   }
@@ -517,10 +581,10 @@ export function ClosetPage() {
   }
 
   async function generate() {
-    if (!body?.person || !top || !bottom || chosen.length > maxGarments()) return
+    if (!body?.person || !outfitReady || chosen.length > maxGarments()) return
     const pieces: WearPiece[] = chosen.flatMap((item) =>
       item.stickerBlob && stickerAligned(item, body.updatedAt)
-        ? [{ role: item.category, name: item.name, blob: item.stickerBlob }]
+        ? [{ role: item.category, name: item.name, blob: item.cutoutBlob }]
         : [],
     )
     if (pieces.length !== chosen.length) {
@@ -578,8 +642,14 @@ export function ClosetPage() {
   }
 
   const placedStickers = body?.person ? chosen.filter((item) => stickerAligned(item, body.updatedAt)).length : 0
-  const driftedStickers = body?.person ? chosen.filter((item) => item.stickerBlob && item.stickerFor !== body.updatedAt).length : 0
+  const driftedStickers = body?.person
+    ? chosen.filter((item) => item.stickerBlob && item.stickerFor != null && item.stickerFor !== body.updatedAt).length
+    : 0
   const missingStickers = body?.person ? chosen.filter((item) => !item.stickerBlob).length : 0
+  const stickerErrorText =
+    stickerError && !(body?.person && garments.some((item) => item.id === stickerError.id && stickerCurrent(item, body.updatedAt)))
+      ? stickerError.text
+      : ''
   let mixHint = '这是把存好的贴合图层盖在个人模特上的预览，不再请求模型。全身效果再点搭配。'
   if (!body) mixHint = '先建立身形，衣服才能穿到个人模特上。'
   else if (!body.person) mixHint = '当前是比例参考。贴合图层和全身效果都要用带本人脸的个人模特。'
@@ -589,7 +659,7 @@ export function ClosetPage() {
   else if (missingStickers > 0) mixHint = '选中的衣服里还有没做过贴合图层的。点「做成贴合图层」才会生成，一件用一张额度。'
   else if (placedStickers === chosen.length) mixHint = '存好的贴合图层已经盖在个人模特上。可以拖动。偏了就点还原位置。'
   else if (chosen.length > maxGarments()) mixHint = `一次最多搭配 ${maxGarments()} 件，先拿下几件。`
-  else if (!top || !bottom) mixHint = '上衣和下装都点上之后，就可以生成更真实的全身照。'
+  else if (!outfitReady) mixHint = '点上一件上衣，再点裤子或裙子，就可以生成全身照。只点连衣裙也可以。'
   else if (result && !sameOutfit) mixHint = '基准图上已经换成新的单品。再点搭配，才会生成新的全身照。'
 
   const stackedLayers = [...layers].sort((a, b) => STACK.indexOf(a.category) - STACK.indexOf(b.category))
@@ -623,8 +693,31 @@ export function ClosetPage() {
             <button
               key={item}
               type="button"
-              className={shelf === item ? 'chip selected' : 'chip'}
+              className={['chip', shelf === item ? 'selected' : '', dragging && shelf !== item ? 'drop-target' : '', dropSeason === item ? 'drop-over' : ''].filter(Boolean).join(' ')}
               onClick={() => openShelf(item)}
+              onDragOver={(event) => {
+                if (!dragging || shelf === item) return
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                setDropSeason(item)
+              }}
+              onDragLeave={(event) => {
+                const next = event.relatedTarget
+                if (next instanceof Node && event.currentTarget.contains(next)) return
+                setDropSeason((current) => (current === item ? null : current))
+              }}
+              onDrop={(event) => {
+                if (!dragging || shelf === item) return
+                event.preventDefault()
+                chipDropped.current = true
+                const id = event.dataTransfer.getData('text/plain')
+                setDropSeason(null)
+                setDragging(false)
+                window.setTimeout(() => {
+                  chipDropped.current = false
+                }, 80)
+                void moveToSeason(id, item)
+              }}
             >
               {SEASON_LABEL[item]}
             </button>
@@ -708,6 +801,10 @@ export function ClosetPage() {
                           type="button"
                           className="rail-pick"
                           aria-pressed={selected}
+                          draggable={shelf !== 'accessory'}
+                          title={shelf === 'accessory' ? undefined : `拖到其他季节，仍是${CATEGORY_LABEL[item.category]}`}
+                          onDragStart={(event) => beginDrag(event, item)}
+                          onDragEnd={endDrag}
                           onClick={() => toggle(item)}
                         >
                           <BlobImg blob={item.cutoutBlob} alt={garmentLabel(item.name)} className="thumb" />
@@ -787,7 +884,9 @@ export function ClosetPage() {
               )}
               <figcaption>
                 {layers.length > 0
-                  ? '拖动贴纸调整位置和大小'
+                  ? activeSticker
+                    ? '拖动贴纸调整位置和大小'
+                    : '点一下贴纸，再调整位置和大小'
                   : sticking && placedStickers === 0
                     ? '正在穿到身上'
                     : chosen.length
@@ -807,21 +906,23 @@ export function ClosetPage() {
                     {CATEGORY_LABEL[layer.category]}
                   </button>
                 ))}
-                <label className="sticker-size">
-                  大小
-                  <input
-                    type="range"
-                    min={0.35}
-                    max={2.8}
-                    step={0.02}
-                    value={activeSticker ? nudgeOf(activeSticker).scale : 1}
-                    onChange={(event) => scaleActive(Number(event.target.value))}
-                  />
-                </label>
                 {activeSticker ? (
-                  <button type="button" className="text-button" onClick={() => applyNudge(activeSticker, { dx: 0, dy: 0, scale: 1 }, true)}>
-                    还原位置
-                  </button>
+                  <>
+                    <label className="sticker-size">
+                      大小
+                      <input
+                        type="range"
+                        min={0.35}
+                        max={2.8}
+                        step={0.02}
+                        value={nudgeOf(activeSticker).scale}
+                        onChange={(event) => scaleActive(Number(event.target.value))}
+                      />
+                    </label>
+                    <button type="button" className="text-button" onClick={() => applyNudge(activeSticker, { dx: 0, dy: 0, scale: 1 }, true)}>
+                      还原位置
+                    </button>
+                  </>
                 ) : null}
               </div>
             ) : null}
@@ -836,7 +937,7 @@ export function ClosetPage() {
               </div>
             ) : null}
             <p className="hint">{mixHint}</p>
-            {stickerError ? <p className="error">{stickerError}</p> : null}
+            {stickerErrorText ? <p className="error">{stickerErrorText}</p> : null}
             <button type="button" className="primary" disabled={!canGenerate} onClick={() => void generate()}>
               {making ? '正在生成全身照片…' : '搭配'}
             </button>
@@ -875,7 +976,7 @@ export function ClosetPage() {
             <p className="recipe">{sources.map((piece) => garmentLabel(piece.name)).join('  +  ')}</p>
             <p className="hint">
               {sameOutfit
-                ? '这是个人模特加上已经贴合的单品生成的全身照。脸和身材保持个人模特。'
+                ? '这是按个人模特的脸和身材，参考这些商品图生成的全身照。'
                 : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
             </p>
             <AdjustNote value={note} busy={making} onChange={setNote} onSubmit={() => void revise()} />

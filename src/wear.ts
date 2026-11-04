@@ -1,6 +1,6 @@
 import { extractWornGarment } from './imaging.ts'
 import { maxGarments, type ImageTaskId } from './model-config.ts'
-import type { Adjustments, BodyMarks, Category, StickerFrame } from './types.ts'
+import { CATEGORY_LABEL, type Adjustments, type BodyMarks, type Category, type StickerFrame } from './types.ts'
 
 export type WearPiece = {
   role: Category | '参考'
@@ -27,15 +27,17 @@ type WearInput = {
 
 const ROLE_LINE: Record<WearPiece['role'], string> = {
   top: '要穿上的上衣',
-  bottom: '要穿上的下装',
+  dress: '要穿上的连衣裙',
+  skirt: '要穿上的裙子',
+  pants: '要穿上的裤子',
   outer: '要穿上的外套',
   shoes: '要穿上的鞋子',
+  belt: '要系的腰带',
   bag: '要拿的包',
   hat: '要戴的帽子',
   scarf: '要戴的围巾',
-  necklace: '要戴的项链',
-  watch: '要戴的手表或手链',
-  belt: '要系的腰带',
+  glasses: '要戴的眼镜',
+  jewelry: '要戴的珠宝',
   参考: '同一套衣服的参考照片，用来对齐颜色、图案和版型',
 }
 
@@ -111,33 +113,33 @@ function promptFor(input: WearInput): string {
   const clothes = input.pieces
     .map(
       (piece, index) =>
-        `图${index + 2}是已经按这个人贴合好的${ROLE_LINE[piece.role]}，名称是「${piece.name}」。浅米色空白是透明的地方。按它在画面里的位置穿上，只取这一件的颜色、图案和形状。`,
+        `图${index + 2}是${ROLE_LINE[piece.role]}的商品图，名称是「${piece.name}」。只参考它的颜色、图案、版型和细节。不要按它在画面里的位置摆放，也不要把商品图原样贴上去。`,
     )
     .join('\n')
   const lines = [
     '生成一张写实的全身照片，从头到脚都在画面里。',
     '图1是这个人的个人模特。脸、五官、肤色、表情、身材、站姿和画面裁切都保持图1。',
     `她大约 ${input.heightCm} 厘米，${input.weightKg} 公斤，${input.bodyLabel}。这些数字只用来核对，肩宽、腰、胯、腿长都保持图1。`,
-    '图1现在穿着运动背心和紧身裤。用后面这些已经贴合好的单品换掉对应部位。',
+    '图1现在穿着运动背心和紧身裤。用后面的商品图，把这些单品真实地穿在这个人身上。',
     clothes,
-    '上衣压住裤腰，裤子压住鞋，外套穿在上衣外面。包和配饰留在各自图层里的位置。',
-    '不要把商品图里的模特带进来，也不要重画一套不同的衣服。',
+    '上衣或连衣裙压住裤腰和裙腰，裤子和裙子压住鞋面，外套穿在上衣外面。帽子戴在头上，围巾围在脖子上。',
+    '不要把商品图里的模特、衣架或背景带进来，也不要换成另一套衣服。',
     '不要拼贴，不要文字，不要水印，不要多余的人。',
   ]
   if (input.pieces.some((piece) => piece.role === 'bag')) {
-    lines.push('包留在图里那只手的位置：提手在手里，包身垂在身体外侧。不要斜挎，不要换到另一只手。')
+    lines.push('包用右手拎住提手，包身垂在身体外侧。不要斜挎，不要换到左手。')
   }
-  if (input.pieces.some((piece) => piece.role === 'necklace')) lines.push('项链只出现在脖子前面。')
-  if (input.pieces.some((piece) => piece.role === 'watch')) lines.push('手表或手链留在图里那只手腕的正面。')
+  if (input.pieces.some((piece) => piece.role === 'jewelry')) lines.push('项链戴在脖子前面，手表或手链戴在右手腕正面。')
+  if (input.pieces.some((piece) => piece.role === 'glasses')) lines.push('眼镜戴在眼睛上。')
   const note = input.adjust?.trim()
   if (note) {
-    const topAt = input.pieces.findIndex((piece) => piece.role === 'top')
-    const bottomAt = input.pieces.findIndex((piece) => piece.role === 'bottom')
+    const topAt = input.pieces.findIndex((piece) => piece.role === 'top' || piece.role === 'dress')
+    const bottomAt = input.pieces.findIndex((piece) => piece.role === 'pants' || piece.role === 'skirt')
     lines.push('这次仍然保持图1的脸、身材和站姿。')
     lines.push(`用户指定的穿法，必须照做：${note}`)
     if (topAt >= 0 && bottomAt >= 0 && /下摆|裤腰|塞进|外面|里面/.test(note)) {
       lines.push(
-        `图${topAt + 2}的上衣底边要全部露在图${bottomAt + 2}的裤腰外面，盖住裤腰一截，能看见完整的上衣底边。不要把上衣塞进裤子。`,
+        `图${topAt + 2}的衣摆要全部露在图${bottomAt + 2}的腰头外面，盖住腰头一截，能看见完整的衣摆。不要把上衣塞进裤子或裙子。`,
       )
     }
   }
@@ -225,34 +227,67 @@ export async function generateBasePhoto(input: MeasureInput & { photoBlob: Blob;
   return postWear('avatar', prompt, [input.photoBlob])
 }
 
-export function flatLayPrompt(name: string): string {
-  return [
-    '把图1整理成一张白底平铺商品图。',
-    '图1可能是穿着拍的、单独拍的衣服，也可能是网店模特的上身图。你自己判断衣服在人身上、衣架上还是摊在地上。',
-    `只保留「${name}」这一件，正面展平。`,
-    '颜色、图案、领、袖、裤长和鞋型跟原图一致。',
-    '不要人，不要衣架，不要原背景，不要文字，不要水印。背景是纯白。',
-  ].join('\n')
+const FLAT_KEEP: Record<Category, string> = {
+  top: '保留这件上衣的领、袖、下摆、颜色和图案。不要外套、裤子、裙子、鞋子。',
+  dress: '保留这件连衣裙从领口到裙摆的完整样子。不要另外的上衣、外套、裤子、鞋子。',
+  skirt: '保留这件裙子的腰头和裙摆。被上衣挡住的腰头按这条裙子补全。不要上衣、外套、裤子、鞋子。',
+  pants: '保留这条裤子的腰头、裤腿、裤长、颜色和图案。被上衣挡住的腰头按这条裤子补全。不要上衣、外套、裙子、鞋子。',
+  outer: '保留这件外套的领、袖、下摆、颜色和图案。不要里面的上衣、裤子、裙子、鞋子。',
+  shoes: '只保留这一双鞋，左脚和右脚都在。不要裤脚、裙摆和其他衣服。',
+  belt: '只保留这根腰带。不要上衣、裤子、裙子。',
+  bag: '只保留这只包。不要身体、衣服和鞋子。',
+  hat: '只保留这顶帽子。不要脸、头发和衣服。',
+  scarf: '只保留这条围巾。不要衣服和身体。',
+  glasses: '只保留这副眼镜。不要脸和衣服。',
+  jewelry: '只保留这一件珠宝。不要身体和衣服。',
 }
 
-export async function generateFlatLay(input: { name: string; blob: Blob }): Promise<Blob> {
-  return postWear('flatlay', flatLayPrompt(input.name), [input.blob])
+export function flatLayPrompt(category: Category, name: string): string {
+  const label = CATEGORY_LABEL[category]
+  const lines = [
+    '把图1整理成一张白底平铺商品图。',
+    '图1可能是穿着拍的、单独拍的，也可能是网店上身图。你自己判断单品在人身上、衣架上还是摊在地上。画面里常常还有别的单品。',
+    `这次只要${label}。只保留这一件，正面展平。`,
+    FLAT_KEEP[category],
+    '不要人，不要衣架，不要原背景，不要文字，不要水印。背景是纯白。',
+  ]
+  const extra = name.trim()
+  if (extra && extra !== label) lines.push(`用户补充的描述是「${extra}」，仍然只出${label}。`)
+  return lines.join('\n')
+}
+
+export async function generateFlatLay(input: { category: Category; name: string; blob: Blob }): Promise<Blob> {
+  return postWear('flatlay', flatLayPrompt(input.category, input.name), [input.blob])
 }
 
 const FIT_PLACE: Record<Category, string> = {
   top: '上衣的肩线落在图1肩膀的位置，袖子顺着图1的手臂，衣长跟图2。',
-  bottom: '裤腰落在图1的腰上，裤腿顺着图1的腿，裤长跟图2。',
+  dress: '连衣裙的肩线落在图1肩膀的位置，裙摆长度跟图2。',
+  skirt: '裙腰落在图1的腰上，裙摆长度跟图2。',
+  pants: '裤腰落在图1的腰上，裤腿顺着图1的腿，裤长跟图2。',
   outer: '外套的肩线落在图1肩膀上，穿在上衣外面的位置，衣长跟图2。',
-  shoes: '左脚一只、右脚一只，落在图1两只脚的位置，靴筒高度跟图2。',
+  shoes: '鞋子穿进图1的脚里，盖住原来的脚趾。图2没有靴筒时不要画成长靴。',
+  belt: '腰带系在图1腰上的位置。',
   bag: '模特用右手拎住提手，左手保持原样。包身完整垂在身体外侧。不要斜挎，不要只露出一小块。',
   hat: '帽子落在图1头顶的位置。',
   scarf: '围巾围在图1脖子的位置。',
-  necklace: '项链只出现在图1脖子前面的位置，连成完整的一块。',
-  watch: '手表或手链落在图1右手腕正面的位置，是完整的一段。',
-  belt: '腰带系在图1腰上的位置。',
+  glasses: '眼镜戴在图1眼睛的位置。',
+  jewelry: '项链落在图1脖子前面，手表或手链落在图1右手腕正面。只出现这一件。',
 }
 
 export function stickerPrompt(input: { name: string; category: Category }): string {
+  if (input.category === 'shoes') {
+    const title = input.name.includes('/') ? '这双鞋' : input.name
+    return [
+      '在图1上改图。图1是个人模特，输出必须和图1是同一张画面。',
+      '脸、五官、头发、表情、身材、站姿、腿、画面裁切和背景都保持图1。禁止重画脸，禁止换姿势，禁止换背景。',
+      `图2是「${title}」的商品图，经常是从上往下拍的。不要把这张俯拍图原样竖着贴在脚前面。`,
+      '把鞋子穿进图1的两只脚里，左脚一只、右脚一只。鞋头方向跟图1的脚尖一致，鞋跟落在脚后跟。',
+      '鞋面要盖住原来的脚趾和脚面，原来的脚趾不要再露出来。鞋子的大小刚好包住脚。',
+      '图2没有高出脚踝的靴筒时，鞋子只到脚踝，不要盖住小腿，不要画成长靴。只有图2本身是短靴或长靴时，靴筒高度才跟图2。',
+      '除了两只脚上的鞋子，其余都保持图1。不要文字，不要水印，不要其他人。',
+    ].join('\n')
+  }
   if (input.category === 'bag') {
     return [
       '在图1上改图。图1是个人模特，输出必须和图1是同一张画面。',

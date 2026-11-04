@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type DragEvent } from 'react'
 import { AdjustNote, BlobImg } from '../components.tsx'
-import { blobToCanvas, compositeLook, dominantColor, stickerLayer, type StickerFrame } from '../imaging.ts'
-import { addedOrder, garmentLabel, nextGarmentName } from '../garment-name.ts'
+import { blobToCanvas, compositeLook, dominantColor, isolateProductCutout, stickerLayer, type StickerFrame } from '../imaging.ts'
+import { addedOrder, garmentLabel, isClothingCategory, nextGarmentName, relocatedGarmentName } from '../garment-name.ts'
 import { maxGarments } from '../model-config.ts'
 import { useWardrobe } from '../store.tsx'
 import {
@@ -10,9 +10,11 @@ import {
   CATEGORY_LABEL,
   CATEGORY_ORDER,
   CLOTHING_ORDER,
+  canMakeOutfit,
   SEASON_LABEL,
   SEASON_ORDER,
   stickerAligned,
+  stickerCurrent,
   stickerVersionFor,
   type Category,
   type Garment,
@@ -21,7 +23,7 @@ import {
 import { generateFlatLay, generateGarmentSticker, generateWearPhoto, wearError, type WearPiece } from '../wear.ts'
 
 const stickerInflight = new Set<string>()
-const STACK: Category[] = ['shoes', 'bottom', 'top', 'belt', 'outer', 'scarf', 'necklace', 'hat', 'watch', 'bag']
+const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'outer', 'scarf', 'jewelry', 'hat', 'glasses', 'bag']
 
 type Shelf = Season | 'accessory'
 type Nudge = { dx: number; dy: number; scale: number }
@@ -50,6 +52,8 @@ export function WishlistPage() {
   const [covered, setCovered] = useState<Partial<Record<Category, string>>>({})
   const [stage, setStage] = useState(false)
   const [shelf, setShelf] = useState<Shelf>('summer')
+  const [dragging, setDragging] = useState(false)
+  const [dropSeason, setDropSeason] = useState<Season | null>(null)
   const [name, setName] = useState('')
   const [category, setCategory] = useState<Category>('top')
   const [pending, setPending] = useState<{ originalBlob: Blob; flatLay: boolean } | null>(null)
@@ -63,7 +67,7 @@ export function WishlistPage() {
   const [note, setNote] = useState('')
   const [preview, setPreview] = useState<Blob | null>(null)
   const [sticking, setSticking] = useState<string | null>(null)
-  const [stickerError, setStickerError] = useState('')
+  const [stickerError, setStickerError] = useState<{ id: string; text: string } | null>(null)
   const [layers, setLayers] = useState<StickerLayer[]>([])
   const [nudges, setNudges] = useState<Record<string, Nudge>>({})
   const [activeSticker, setActiveSticker] = useState<string | null>(null)
@@ -75,12 +79,18 @@ export function WishlistPage() {
   const layerUrls = useRef<string[]>([])
   const nudgesRef = useRef(nudges)
   const saveTimer = useRef(0)
+  const cardDragged = useRef(false)
+  const chipDropped = useRef(false)
   const resultRef = useRef<HTMLElement>(null)
   nudgesRef.current = nudges
   bodyRef.current = body
   garmentsRef.current = garments
 
   const wished = garments.filter((item) => item.status === 'wishlist')
+  const wishedVisible =
+    shelf === 'accessory'
+      ? wished.filter((item) => ACCESSORY_ORDER.includes(item.category))
+      : wished.filter((item) => CLOTHING_ORDER.includes(item.category) && seasonOf(item.season) === shelf)
   const owned = garments.filter((item) => item.status === 'owned')
   const selected = CATEGORY_ORDER.flatMap((slot) => {
     const item = wished.find((garment) => garment.id === picked[slot] && garment.category === slot)
@@ -95,15 +105,13 @@ export function WishlistPage() {
         return item ? [item] : []
       })
     : []
-  const top = worn.find((item) => item.category === 'top')
-  const bottom = worn.find((item) => item.category === 'bottom')
   const currentIds = worn.map((item) => item.id)
   const sameOutfit = currentIds.length === madeFrom.length && currentIds.every((id, index) => id === madeFrom[index])
+  const outfitReady = canMakeOutfit(worn.map((item) => item.category))
   const canGenerate = Boolean(
     stage &&
       body?.person &&
-      top &&
-      bottom &&
+      outfitReady &&
       worn.length <= maxGarments() &&
       !making &&
       worn.every((item) => stickerAligned(item, body.updatedAt)),
@@ -113,7 +121,8 @@ export function WishlistPage() {
     shelf === 'accessory'
       ? owned.filter((item) => ACCESSORY_ORDER.includes(item.category))
       : owned.filter((item) => CLOTHING_ORDER.includes(item.category) && seasonOf(item.season) === shelf)
-  const stickerKey = worn
+  const onBody = stage ? worn : selected
+  const stickerKey = onBody
     .filter((item) => body?.person && stickerAligned(item, body.updatedAt) && item.stickerBlob)
     .map((item) => {
       const frame = item.stickerFrame
@@ -121,27 +130,31 @@ export function WishlistPage() {
       return `${item.id}:${item.stickerVer ?? 0}:${item.stickerBlob?.size ?? 0}:${box}`
     })
     .join('|')
-  const placeKey = worn
+  const placeKey = onBody
     .map((item) => {
       const place = item.stickerPlace
       return place ? `${item.id}:${place.dx}:${place.dy}:${place.scale}` : item.id
     })
     .join('|')
   const pendingStickers = body?.person
-    ? selected.filter((item) => !stickerAligned(item, body.updatedAt)).length
+    ? onBody.filter((item) => !stickerAligned(item, body.updatedAt)).length
     : 0
-  const wornKey = worn.map((item) => item.id).join('|')
+  const stickerErrorText =
+    stickerError && !(body?.person && garments.some((item) => item.id === stickerError.id && stickerCurrent(item, body.updatedAt)))
+      ? stickerError.text
+      : ''
+  const onBodyKey = onBody.map((item) => item.id).join('|')
 
   useEffect(() => {
     if (result) resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [result])
 
   useEffect(() => {
-    if (!stage || !body || body.person) {
+    if (!body || body.person) {
       setPreview(null)
       return
     }
-    const items = worn.map((item) => ({ category: item.category, blob: item.cutoutBlob }))
+    const items = onBody.map((item) => ({ category: item.category, blob: item.cutoutBlob }))
     if (items.length === 0) {
       setPreview(null)
       return
@@ -157,7 +170,7 @@ export function WishlistPage() {
     return () => {
       cancelled = true
     }
-  }, [stage, body, wornKey])
+  }, [body, onBodyKey])
 
   useEffect(() => {
     setNudges((current) => {
@@ -175,11 +188,11 @@ export function WishlistPage() {
   }, [placeKey])
 
   useEffect(() => {
-    if (!stage || !body?.person) {
+    if (!body?.person) {
       setLayers([])
       return
     }
-    const showing = worn.filter((item) => stickerAligned(item, body.updatedAt))
+    const showing = onBody.filter((item) => stickerAligned(item, body.updatedAt))
     let cancelled = false
     const created: string[] = []
     void (async () => {
@@ -198,6 +211,7 @@ export function WishlistPage() {
                 stickerBlob: laid.png,
                 stickerFrame: laid.frame,
                 stickerPlace: place,
+                ...(item.stickerFor == null ? { stickerFor: body.updatedAt } : {}),
               })
             }
           }
@@ -226,14 +240,23 @@ export function WishlistPage() {
     return () => {
       cancelled = true
     }
-  }, [stickerKey, stage, body])
+  }, [stickerKey, body])
 
   useEffect(() => {
-    setActiveSticker((current) => {
-      if (current && layers.some((layer) => layer.id === current)) return current
-      return layers.at(-1)?.id ?? null
-    })
+    setActiveSticker((current) => (current && layers.some((layer) => layer.id === current) ? current : null))
   }, [layers])
+
+  useEffect(() => {
+    if (!activeSticker) return
+    const dismiss = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      if (target.closest('.sticker-layer, .sticker-tools, .sticker-handle')) return
+      setActiveSticker(null)
+    }
+    window.addEventListener('pointerdown', dismiss)
+    return () => window.removeEventListener('pointerdown', dismiss)
+  }, [activeSticker])
 
   useEffect(
     () => () => {
@@ -353,10 +376,11 @@ export function WishlistPage() {
     )
   }
 
-  function enqueueSticker(item: Garment) {
+  function enqueueSticker(item: Garment, manual = false) {
     const profile = bodyRef.current
     if (!profile?.person) return
-    if (stickerAligned(item, profile.updatedAt)) return
+    if (stickerCurrent(item, profile.updatedAt)) return
+    if (!manual && item.stickerBlob) return
     if (stickerInflight.has(item.id) || queueRef.current.some((queued) => queued.id === item.id)) return
     queueRef.current.push(item)
     void drainStickers()
@@ -372,10 +396,10 @@ export function WishlistPage() {
         const profile = bodyRef.current
         if (!profile?.person || stickerInflight.has(next.id)) continue
         const latest = garmentsRef.current.find((garment) => garment.id === next.id) ?? next
-        if (stickerAligned(latest, profile.updatedAt)) continue
+        if (stickerCurrent(latest, profile.updatedAt)) continue
         stickerInflight.add(latest.id)
         setSticking(latest.id)
-        setStickerError('')
+        setStickerError((current) => (current?.id === latest.id ? null : current))
         try {
           const wornSticker = await generateGarmentSticker({
             bodyBlob: profile.imageBlob,
@@ -394,8 +418,15 @@ export function WishlistPage() {
             stickerVer: stickerVersionFor(latest.category),
             stickerPlace: place,
           })
+          setStickerError((current) => (current?.id === latest.id ? null : current))
         } catch (cause) {
-          setStickerError(wearError(cause))
+          const saved = garmentsRef.current.find((garment) => garment.id === latest.id)
+          const profileNow = bodyRef.current
+          if (saved && profileNow?.person && stickerCurrent(saved, profileNow.updatedAt)) {
+            setStickerError((current) => (current?.id === latest.id ? null : current))
+          } else {
+            setStickerError({ id: latest.id, text: `${garmentLabel(latest.name)}：${wearError(cause)}` })
+          }
         } finally {
           stickerInflight.delete(latest.id)
           setSticking(null)
@@ -406,10 +437,17 @@ export function WishlistPage() {
     }
   }
 
+  function stickerReady(item: Garment): boolean {
+    return Boolean(body?.person && stickerCurrent(item, body.updatedAt))
+  }
+
   function toggleWish(item: Garment) {
+    if (cardDragged.current) return
+    const on = picked[item.category] === item.id
+    if (!on) enqueueSticker(item)
     setPicked((current) => ({
       ...current,
-      [item.category]: current[item.category] === item.id ? undefined : item.id,
+      [item.category]: on ? undefined : item.id,
     }))
   }
 
@@ -422,6 +460,35 @@ export function WishlistPage() {
     }))
   }
 
+  function beginDrag(event: DragEvent, item: Garment) {
+    if (!isClothingCategory(item.category) || shelf === 'accessory') return
+    cardDragged.current = true
+    setDragging(true)
+    event.dataTransfer.setData('text/plain', item.id)
+    event.dataTransfer.effectAllowed = 'move'
+  }
+
+  function endDrag() {
+    setDragging(false)
+    setDropSeason(null)
+    window.setTimeout(() => {
+      cardDragged.current = false
+    }, 80)
+  }
+
+  async function moveToSeason(id: string, season: Season) {
+    const item = garmentsRef.current.find((garment) => garment.id === id && garment.status === 'wishlist')
+    if (!item) return
+    const name = relocatedGarmentName(garmentsRef.current, item, season)
+    if (!name) return
+    const moved = await updateGarment(item.id, { name, season })
+    if (!moved) return
+    setPicked((current) => (current[item.category] === item.id ? { ...current, [item.category]: undefined } : current))
+    setTryOn((current) => (current[item.category] === item.id ? { ...current, [item.category]: undefined } : current))
+    const sameNumber = garmentLabel(item.name) === garmentLabel(moved.name)
+    notify(sameNumber ? `已放到${SEASON_LABEL[season]}` : `已放到${SEASON_LABEL[season]}，编号改为 ${garmentLabel(moved.name)}`)
+  }
+
   function begin() {
     if (!body || selected.length === 0) return
     setTryOn({ ...picked })
@@ -430,7 +497,7 @@ export function WishlistPage() {
     setSources([])
     setMadeFrom([])
     setWearProblem('')
-    setStickerError('')
+    setStickerError(null)
     setStage(true)
     for (const item of selected) enqueueSticker(item)
   }
@@ -448,7 +515,6 @@ export function WishlistPage() {
   function takeFile(file: File) {
     setUploadError('')
     setPending({ originalBlob: file, flatLay: false })
-    if (!name) setName(file.name.replace(/\.[^.]+$/, ''))
   }
 
   function cancelUpload() {
@@ -463,9 +529,10 @@ export function WishlistPage() {
     setPreparing(true)
     setUploadError('')
     try {
-      const product = pending.flatLay ? pending.originalBlob : await generateFlatLay({ name: label, blob: pending.originalBlob })
+      const flat = pending.flatLay ? pending.originalBlob : await generateFlatLay({ category, name: label, blob: pending.originalBlob })
+      const product = await isolateProductCutout(flat)
       const color = dominantColor(await blobToCanvas(product))
-      const clothing = category === 'top' || category === 'bottom' || category === 'outer' || category === 'shoes'
+      const clothing = isClothingCategory(category)
       const season = clothing ? (shelf === 'accessory' ? 'summer' : shelf) : undefined
       await addGarment({
         name: nextGarmentName(garments, 'wishlist', category, season),
@@ -487,7 +554,7 @@ export function WishlistPage() {
   }
 
   async function own(item: Garment) {
-    const clothing = item.category === 'top' || item.category === 'bottom' || item.category === 'outer' || item.category === 'shoes'
+    const clothing = isClothingCategory(item.category)
     const season = clothing ? (item.season ?? 'summer') : undefined
     const moved = await updateGarment(item.id, {
       status: 'owned',
@@ -523,10 +590,10 @@ export function WishlistPage() {
   }
 
   async function generate() {
-    if (!body?.person || !top || !bottom || worn.length > maxGarments()) return
+    if (!body?.person || !outfitReady || worn.length > maxGarments()) return
     const pieces: WearPiece[] = worn.flatMap((item) =>
       item.stickerBlob && stickerAligned(item, body.updatedAt)
-        ? [{ role: item.category, name: item.name, blob: item.stickerBlob }]
+        ? [{ role: item.category, name: item.name, blob: item.cutoutBlob }]
         : [],
     )
     if (pieces.length !== worn.length) {
@@ -589,16 +656,17 @@ export function WishlistPage() {
   else if (!body.person) mixHint = '当前是比例参考。贴合图层和全身效果都要用带本人脸的个人模特。'
   else if (sticking) mixHint = '正在按这个人的肩、腰、手脚生成这一件的透明图层。这一件用一张额度。'
   else if (worn.length > maxGarments()) mixHint = `一次最多搭配 ${maxGarments()} 件，先拿下几件。`
-  else if (!top || !bottom) mixHint = '上衣和下装都在身上之后，就可以生成全身照。缺的可以从左边衣橱点上。'
+  else if (!outfitReady) mixHint = '点上一件上衣，再点裤子或裙子，就可以生成全身照。只点连衣裙也可以。缺的可以从左边衣橱点上。'
   else if (result && !sameOutfit) mixHint = '身上的单品已经换了。再点搭配，才会生成新的全身照。'
   else mixHint = '这是贴合图层盖在个人模特上的预览。全身效果再点搭配。'
 
-  let pickHint = '每类可以选一件。选好后点试穿，才会穿到模特身上。'
+  let pickHint = '点左边还没买的单品。有贴合图层的会直接盖到个人模特上。'
   if (!body) pickHint = '还没有基准图。可以先把衣服放进想买，建立身形之后再试穿。'
-  else if (selected.length === 0) pickHint = '点左边还没买的单品。每一类只留一件。'
-  else if (body.person && pendingStickers > 0) pickHint = `试穿时，还没有贴合图层的 ${pendingStickers} 件会按个人模特生成，每件一张额度。已经做好的直接贴上。`
-  else if (body.person) pickHint = '这些都有贴合图层。试穿会直接贴到个人模特上。'
-  else pickHint = '点试穿后，这些衣服会盖到基准图上。'
+  else if (!body.person) pickHint = '当前是比例参考。点选会盖到基准图上。贴合图层要等带本人脸的个人模特。'
+  else if (selected.length === 0) pickHint = '点左边还没买的单品。有贴合图层的会直接盖到个人模特上。每一类只留一件。'
+  else if (sticking) pickHint = '正在按这个人的肩、腰、手脚生成这一件的透明图层。这一件用一张额度。'
+  else if (pendingStickers > 0) pickHint = `选中的衣服里还有 ${pendingStickers} 件没有贴合图层。点「做成贴合图层」才会生成，一件用一张额度。已经做好的直接贴上。`
+  else pickHint = '贴合图层已经盖在个人模特上。可以拖动。点试穿后可以换成衣橱里的衣服，再生成全身照。'
 
   return (
     <div className="closet">
@@ -648,7 +716,53 @@ export function WishlistPage() {
           <span className="count">{visible.length} 件</span>
         </div>
       ) : (
-        <p className="lede">这些衣服还不是你的，不会出现在衣橱的日常搭配里。买回来之后再转入衣橱。</p>
+        <>
+          <p className="lede">这些衣服还不是你的，不会出现在衣橱的日常搭配里。买回来之后再转入衣橱。</p>
+          <div className="season-bar">
+            <div className="chips">
+              {SEASON_ORDER.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  className={['chip', shelf === item ? 'selected' : '', dragging && shelf !== item ? 'drop-target' : '', dropSeason === item ? 'drop-over' : ''].filter(Boolean).join(' ')}
+                  onClick={() => {
+                    if (chipDropped.current) return
+                    setShelf(item)
+                  }}
+                  onDragOver={(event) => {
+                    if (!dragging || shelf === item) return
+                    event.preventDefault()
+                    event.dataTransfer.dropEffect = 'move'
+                    setDropSeason(item)
+                  }}
+                  onDragLeave={(event) => {
+                    const next = event.relatedTarget
+                    if (next instanceof Node && event.currentTarget.contains(next)) return
+                    setDropSeason((current) => (current === item ? null : current))
+                  }}
+                  onDrop={(event) => {
+                    if (!dragging || shelf === item) return
+                    event.preventDefault()
+                    chipDropped.current = true
+                    const id = event.dataTransfer.getData('text/plain')
+                    setDropSeason(null)
+                    setDragging(false)
+                    window.setTimeout(() => {
+                      chipDropped.current = false
+                    }, 80)
+                    void moveToSeason(id, item)
+                  }}
+                >
+                  {SEASON_LABEL[item]}
+                </button>
+              ))}
+              <button type="button" className={shelf === 'accessory' ? 'chip selected' : 'chip'} onClick={() => setShelf('accessory')}>
+                配饰
+              </button>
+            </div>
+            <span className="count">{wishedVisible.length} 件</span>
+          </div>
+        </>
       )}
       <p className="hint">贴纸固定叫 sticker.png，和这件单品放在同一个文件夹里。有这个文件就直接贴上身。</p>
 
@@ -680,8 +794,8 @@ export function WishlistPage() {
             </label>
             <p className="hint">
               {pending.flatLay
-                ? '保存时直接用这张图，不再调用模型。试穿时再按个人模特生成贴合图层。'
-                : '穿着拍、衣服单拍或网店上身图都会整理成白底平铺，用一张额度。贴合图层等到试穿再生成。'}
+                ? '保存时直接用这张图，不再调用模型。点选后可以按个人模特生成贴合图层。'
+                : '穿着拍、衣服单拍或网店上身图都会整理成白底平铺，用一张额度。贴合图层在点选或点「做成贴合图层」时再生成。'}
             </p>
             {uploadError ? <p className="error">{uploadError}</p> : null}
             <div className="pending-actions">
@@ -740,38 +854,63 @@ export function WishlistPage() {
                   <p className="hint">上传一件还没买的单品，选中后再试穿。</p>
                 </div>
               ) : (
-                CATEGORY_ORDER.map((slot) => {
-                  const items = addedOrder(wished.filter((item) => item.category === slot))
-                  if (items.length === 0) return null
+                slots.map((slot) => {
+                  const items = addedOrder(wishedVisible.filter((item) => item.category === slot))
                   return (
                     <section key={slot} className="rail">
                       <h2>{CATEGORY_LABEL[slot]}</h2>
                       <div className="rail-track">
-                        {items.map((item) => {
-                          const on = picked[item.category] === item.id
-                          return (
-                            <article key={item.id} className={on ? 'card rail-card picked' : 'card rail-card'}>
-                              <button type="button" className="rail-pick" aria-pressed={on} onClick={() => toggleWish(item)}>
-                                <BlobImg blob={item.cutoutBlob} alt={garmentLabel(item.name)} className="thumb" />
-                                {on ? <span className="picked-mark">已选</span> : null}
-                                <span className="card-meta">
-                                  <span className="swatch" style={{ background: item.color }} />
-                                  <span>
-                                    <strong>{garmentLabel(item.name)}</strong>
+                        {items.length === 0 ? (
+                          <p className="rail-empty">
+                            {shelf === 'accessory' ? `还没有${CATEGORY_LABEL[slot]}` : `这一季还没有${CATEGORY_LABEL[slot]}`}
+                          </p>
+                        ) : (
+                          items.map((item) => {
+                            const on = picked[item.category] === item.id
+                            const clothing = shelf !== 'accessory' && isClothingCategory(item.category)
+                            return (
+                              <article key={item.id} className={on ? 'card rail-card picked' : 'card rail-card'}>
+                                <button
+                                  type="button"
+                                  className="rail-pick"
+                                  aria-pressed={on}
+                                  draggable={clothing}
+                                  title={clothing ? `拖到其他季节，仍是${CATEGORY_LABEL[item.category]}` : undefined}
+                                  onDragStart={(event) => beginDrag(event, item)}
+                                  onDragEnd={endDrag}
+                                  onClick={() => toggleWish(item)}
+                                >
+                                  <BlobImg blob={item.cutoutBlob} alt={garmentLabel(item.name)} className="thumb" />
+                                  {on ? <span className="picked-mark">已选</span> : null}
+                                  <span className="card-meta">
+                                    <span className="swatch" style={{ background: item.color }} />
+                                    <span>
+                                      <strong>{garmentLabel(item.name)}</strong>
+                                    </span>
                                   </span>
-                                </span>
-                              </button>
-                              <div className="card-actions">
-                                <button type="button" className="text-button" onClick={() => void own(item)}>
-                                  我买了
                                 </button>
-                                <button type="button" className="text-button" onClick={() => void remove(item.id, garmentLabel(item.name))}>
-                                  移除
-                                </button>
-                              </div>
-                            </article>
-                          )
-                        })}
+                                <div className="card-actions">
+                                  {body?.person && !stickerReady(item) ? (
+                                    <button
+                                      type="button"
+                                      className="text-button"
+                                      disabled={sticking === item.id}
+                                      onClick={() => enqueueSticker(item, true)}
+                                    >
+                                      {sticking === item.id ? '正在生成…' : item.stickerBlob ? '重做贴合图层' : '做成贴合图层'}
+                                    </button>
+                                  ) : null}
+                                  <button type="button" className="text-button" onClick={() => void own(item)}>
+                                    我买了
+                                  </button>
+                                  <button type="button" className="text-button" onClick={() => void remove(item.id, garmentLabel(item.name))}>
+                                    移除
+                                  </button>
+                                </div>
+                              </article>
+                            )
+                          })
+                        )}
                       </div>
                     </section>
                   )
@@ -783,7 +922,7 @@ export function WishlistPage() {
           {body ? (
             <>
               <figure className="doll-figure">
-                {stage && layers.length > 0 ? (
+                {layers.length > 0 ? (
                   <div className="doll-stage" ref={stageRef}>
                     <BlobImg blob={body.imageBlob} alt="基准图" className="base-photo" />
                     {stackedLayers.map((layer, index) => {
@@ -818,13 +957,21 @@ export function WishlistPage() {
                     })}
                   </div>
                 ) : (
-                  <BlobImg blob={stage ? (preview ?? body.imageBlob) : body.imageBlob} alt="基准图" />
+                  <BlobImg blob={preview ?? body.imageBlob} alt="基准图" />
                 )}
                 <figcaption>
-                  {stage ? (layers.length > 0 ? '拖动贴纸调整位置和大小' : sticking ? '正在穿到身上' : '试穿') : '基准图'}
+                  {layers.length > 0
+                    ? activeSticker
+                      ? '拖动贴纸调整位置和大小'
+                      : '点一下贴纸，再调整位置和大小'
+                    : sticking
+                      ? '正在穿到身上'
+                      : stage
+                        ? '试穿'
+                        : '基准图'}
                 </figcaption>
               </figure>
-              {stage && layers.length > 0 ? (
+              {layers.length > 0 ? (
                 <div className="sticker-tools">
                   {layers.map((layer) => (
                     <button
@@ -836,21 +983,23 @@ export function WishlistPage() {
                       {CATEGORY_LABEL[layer.category]}
                     </button>
                   ))}
-                  <label className="sticker-size">
-                    大小
-                    <input
-                      type="range"
-                      min={0.35}
-                      max={2.8}
-                      step={0.02}
-                      value={activeSticker ? nudgeOf(activeSticker).scale : 1}
-                      onChange={(event) => scaleActive(Number(event.target.value))}
-                    />
-                  </label>
                   {activeSticker ? (
-                    <button type="button" className="text-button" onClick={() => applyNudge(activeSticker, { dx: 0, dy: 0, scale: 1 }, true)}>
-                      还原位置
-                    </button>
+                    <>
+                      <label className="sticker-size">
+                        大小
+                        <input
+                          type="range"
+                          min={0.35}
+                          max={2.8}
+                          step={0.02}
+                          value={nudgeOf(activeSticker).scale}
+                          onChange={(event) => scaleActive(Number(event.target.value))}
+                        />
+                      </label>
+                      <button type="button" className="text-button" onClick={() => applyNudge(activeSticker, { dx: 0, dy: 0, scale: 1 }, true)}>
+                        还原位置
+                      </button>
+                    </>
                   ) : null}
                 </div>
               ) : null}
@@ -885,7 +1034,7 @@ export function WishlistPage() {
                 </div>
               ) : null}
               <p className="hint">{stage ? mixHint : pickHint}</p>
-              {stickerError ? <p className="error">{stickerError}</p> : null}
+              {stickerErrorText ? <p className="error">{stickerErrorText}</p> : null}
               {stage ? (
                 <button type="button" className="primary" disabled={!canGenerate} onClick={() => void generate()}>
                   {making ? '正在生成全身照片…' : '搭配'}
@@ -929,7 +1078,7 @@ export function WishlistPage() {
             </div>
             <p className="recipe">{sources.map((piece) => garmentLabel(piece.name)).join('  +  ')}</p>
             <p className="hint">
-              {sameOutfit ? '这是按基准图的脸和身材生成的全身照。颜色和图案以原图为准。' : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
+              {sameOutfit ? '这是按个人模特的脸和身材，参考这些商品图生成的全身照。' : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
             </p>
             <AdjustNote value={note} busy={making} onChange={setNote} onSubmit={() => void revise()} />
             {wearProblem ? <p className="error">{wearProblem}</p> : null}

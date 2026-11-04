@@ -40,6 +40,12 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
   const [nav, setNav] = useState<View>('home')
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef(0)
+  const garmentsRef = useRef(garments)
+  const looksRef = useRef(looks)
+  const accountRef = useRef(account)
+  garmentsRef.current = garments
+  looksRef.current = looks
+  accountRef.current = account
 
   useEffect(() => {
     let cancelled = false
@@ -89,8 +95,8 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
           : { id: crypto.randomUUID(), name: input.name, phone: input.phone, avatarBlob: input.avatarBlob, createdAt: Date.now() }
         await persistAccount(next)
         await rememberAccount(next)
-        const ownedGarments = garments.filter((item) => item.userId !== next.id)
-        const ownedLooks = looks.filter((item) => item.userId !== next.id)
+        const ownedGarments = garmentsRef.current.filter((item) => item.userId !== next.id)
+        const ownedLooks = looksRef.current.filter((item) => item.userId !== next.id)
         for (const item of ownedGarments) {
           const updated = { ...item, userId: next.id }
           await putGarment(updated)
@@ -101,12 +107,17 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
           await putLook(updated)
           await rememberLook(updated)
         }
+        accountRef.current = next
         setAccount(next)
         if (ownedGarments.length > 0) {
-          setGarments((current) => current.map((item) => (item.userId === next.id ? item : { ...item, userId: next.id })))
+          const nextGarments = garmentsRef.current.map((item) => (item.userId === next.id ? item : { ...item, userId: next.id }))
+          garmentsRef.current = nextGarments
+          setGarments(nextGarments)
         }
         if (ownedLooks.length > 0) {
-          setLooks((current) => current.map((item) => (item.userId === next.id ? item : { ...item, userId: next.id })))
+          const nextLooks = looksRef.current.map((item) => (item.userId === next.id ? item : { ...item, userId: next.id }))
+          looksRef.current = nextLooks
+          setLooks(nextLooks)
         }
       },
       saveBody: async (profile) => {
@@ -121,15 +132,17 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
       },
       addGarment: async (garment) => {
         const id = isGarmentDir(garment.name) ? garment.name : crypto.randomUUID()
-        const next: Garment = { ...garment, id, userId: account?.id, createdAt: Date.now() }
+        const next: Garment = { ...garment, id, userId: accountRef.current?.id, createdAt: Date.now() }
         await putGarment(next)
         const disk = await rememberGarment(next)
         if (disk === 'deleted') return next
-        setGarments((current) => [next, ...current])
+        const list = [next, ...garmentsRef.current.filter((item) => item.id !== next.id)]
+        garmentsRef.current = list
+        setGarments(list)
         return next
       },
       updateGarment: async (id, patch) => {
-        const current = garments.find((item) => item.id === id)
+        const current = garmentsRef.current.find((item) => item.id === id)
         if (!current) return null
         const name = patch.name ?? current.name
         const nextId = isGarmentDir(name) ? name : id
@@ -140,36 +153,48 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
           await removeGarment(id)
           await forgetGarment(id)
           if (disk === 'deleted') {
-            setGarments((list) => list.filter((item) => item.id !== id))
+            const list = garmentsRef.current.filter((item) => item.id !== id)
+            garmentsRef.current = list
+            setGarments(list)
             return null
           }
-          const rewritten = looks
+          const rewritten = looksRef.current
             .filter((look) => look.garmentIds.includes(id))
             .map((look) => ({ ...look, garmentIds: look.garmentIds.map((item) => (item === id ? nextId : item)) }))
           for (const look of rewritten) {
             await putLook(look)
             await rememberLook(look)
           }
-          setGarments((list) => list.map((item) => (item.id === id ? next : item)))
+          const list = garmentsRef.current.map((item) => (item.id === id ? next : item))
+          garmentsRef.current = list
+          setGarments(list)
           if (rewritten.length > 0) {
             const replaced = new Map(rewritten.map((look) => [look.id, look]))
-            setLooks((list) => list.map((look) => replaced.get(look.id) ?? look))
+            const nextLooks = looksRef.current.map((look) => replaced.get(look.id) ?? look)
+            looksRef.current = nextLooks
+            setLooks(nextLooks)
           }
           return next
         }
         await putGarment(next)
         const disk = await rememberGarment(next)
         if (disk === 'deleted') {
-          setGarments((list) => list.filter((item) => item.id !== id))
+          const list = garmentsRef.current.filter((item) => item.id !== id)
+          garmentsRef.current = list
+          setGarments(list)
           return null
         }
-        setGarments((list) => list.map((item) => (item.id === id ? next : item)))
+        const list = garmentsRef.current.map((item) => (item.id === id ? next : item))
+        garmentsRef.current = list
+        setGarments(list)
         return next
       },
       deleteGarment: async (id) => {
         await removeGarment(id)
         await forgetGarment(id)
-        setGarments((list) => list.filter((item) => item.id !== id))
+        const list = garmentsRef.current.filter((item) => item.id !== id)
+        garmentsRef.current = list
+        setGarments(list)
       },
       addLook: async (look) => {
         const next: Look = { ...look, id: crypto.randomUUID(), userId: account?.id, createdAt: Date.now() }

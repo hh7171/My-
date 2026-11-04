@@ -15,7 +15,7 @@ export function HomePage() {
         <button type="button" className="door" onClick={() => setNav('closet')}>
           <span className="kicker">平常穿</span>
           <strong>搭配衣橱</strong>
-          <span>在衣橱里点选上衣和下装，再点搭配。鞋、包和配饰可以一起选。</span>
+          <span>在衣橱里点选上衣和裤子或裙子，再点搭配。只点连衣裙也可以。鞋、包和配饰可以一起选。</span>
         </button>
         <button type="button" className="door" onClick={() => setNav('wishlist')}>
           <span className="kicker">想买的时候</span>

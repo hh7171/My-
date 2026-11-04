@@ -1,14 +1,16 @@
 export type Category =
   | 'top'
-  | 'bottom'
+  | 'dress'
+  | 'skirt'
+  | 'pants'
   | 'outer'
   | 'shoes'
+  | 'belt'
   | 'bag'
   | 'hat'
   | 'scarf'
-  | 'necklace'
-  | 'watch'
-  | 'belt'
+  | 'glasses'
+  | 'jewelry'
 export type BodyType = 'straight' | 'pear' | 'hourglass' | 'apple'
 export type GarmentStatus = 'owned' | 'wishlist'
 export type Season = 'spring' | 'summer' | 'winter'
@@ -97,7 +99,7 @@ export type Garment = {
   createdAt: number
 }
 
-export const STICKER_VERSION = 15
+export const STICKER_VERSION = 18
 
 export function modelGarmentBlob(item: { cutoutBlob: Blob }): Blob {
   return item.cutoutBlob
@@ -112,7 +114,8 @@ export function stickerAligned(
   item: { stickerBlob?: Blob; stickerFor?: number },
   updatedAt: number,
 ): boolean {
-  return Boolean(item.stickerBlob) && item.stickerFor === updatedAt
+  if (!item.stickerBlob) return false
+  return item.stickerFor == null || item.stickerFor === updatedAt
 }
 
 export function stickerCurrent(
@@ -134,35 +137,43 @@ export type Look = {
 
 export const CATEGORY_ORDER: Category[] = [
   'top',
-  'bottom',
+  'dress',
+  'skirt',
+  'pants',
   'outer',
   'shoes',
+  'belt',
   'bag',
   'hat',
   'scarf',
-  'necklace',
-  'watch',
-  'belt',
+  'glasses',
+  'jewelry',
 ]
 
-export const REQUIRED_SLOTS: Category[] = ['top', 'bottom']
+export function canMakeOutfit(categories: Iterable<Category>): boolean {
+  const present = new Set(categories)
+  if (present.has('dress')) return true
+  return present.has('top') && (present.has('pants') || present.has('skirt'))
+}
 
 export const CATEGORY_LABEL: Record<Category, string> = {
   top: '上衣',
-  bottom: '下装',
+  dress: '连衣裙',
+  skirt: '裙子',
+  pants: '裤子',
   outer: '外套',
   shoes: '鞋子',
+  belt: '腰带',
   bag: '包',
   hat: '帽子',
   scarf: '围巾',
-  necklace: '项链',
-  watch: '手表/手链',
-  belt: '腰带',
+  glasses: '眼镜',
+  jewelry: '珠宝',
 }
 
-export const CLOTHING_ORDER: Category[] = ['top', 'bottom', 'outer', 'shoes']
+export const CLOTHING_ORDER: Category[] = ['top', 'dress', 'skirt', 'pants', 'outer', 'shoes']
 
-export const ACCESSORY_ORDER: Category[] = ['bag', 'hat', 'scarf', 'necklace', 'watch', 'belt']
+export const ACCESSORY_ORDER: Category[] = ['belt', 'bag', 'hat', 'scarf', 'glasses', 'jewelry']
 
 export const SEASON_ORDER: Season[] = ['spring', 'summer', 'winter']
 
