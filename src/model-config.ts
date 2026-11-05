@@ -23,9 +23,9 @@ const OUTFIT_GARMENT_CAP = 8
 export const IMAGE_PROVIDER: ImageProviderId = 'ark'
 
 export const ARK_IMAGE = {
-  // 控制台「Doubao-Seedream-4.0」对应这个版本。250828 已停售，调它会 404。
-  model: 'doubao-seedream-4-0-20260415',
-  maxReferences: 14,
+  // Agent Plan 的 Seedream 5.0 pro。参考图最多 10 张，不支持组图参数。
+  model: 'doubao-seedream-5.0-pro',
+  maxReferences: 10,
   watermark: false,
 }
 

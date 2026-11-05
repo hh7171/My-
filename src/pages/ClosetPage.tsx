@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { AdjustNote, BlobImg } from '../components.tsx'
-import { blobToCanvas, compositeLook, dominantColor, isolateProductCutout, stickerLayer, type StickerFrame } from '../imaging.ts'
+import { blobToCanvas, compositeLook, dominantColor, isolateProductCutout, raiseSecondWrist, secondWristShift, stickerLayer, type StickerFrame } from '../imaging.ts'
 import { useWardrobe } from '../store.tsx'
 import {
   ACCESSORY_ORDER,
@@ -9,21 +9,25 @@ import {
   CATEGORY_ORDER,
   CLOTHING_ORDER,
   canMakeOutfit,
+  withoutDressConflict,
   SEASON_LABEL,
   SEASON_ORDER,
   stickerAligned,
   stickerCurrent,
+  placedJewelry,
   stickerVersionFor,
+  wristWearOrder,
   type Category,
   type Garment,
   type Season,
 } from '../types.ts'
 import { addedOrder, garmentLabel, isClothingCategory, nextGarmentName, relocatedGarmentName } from '../garment-name.ts'
 import { maxGarments } from '../model-config.ts'
-import { generateFlatLay, generateGarmentSticker, generateWearPhoto, wearError, type WearPiece } from '../wear.ts'
+import { composeLookPoster } from '../look-board.tsx'
+import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateWearPhoto, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
 
 const stickerInflight = new Set<string>()
-const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'outer', 'scarf', 'jewelry', 'hat', 'glasses', 'bag']
+const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'scarf', 'necklace', 'earrings', 'jewelry', 'bracelet', 'watch', 'hat', 'glasses', 'bag']
 
 type Shelf = Season | 'accessory'
 type Nudge = { dx: number; dy: number; scale: number }
@@ -60,7 +64,13 @@ export function ClosetPage() {
   const [filing, setFiling] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const [picked, setPicked] = useState<Partial<Record<Category, string>>>({})
+  const [pickOrder, setPickOrder] = useState<string[]>([])
+  const [wristSaved, setWristSaved] = useState<Array<'watch' | 'bracelet'>>([])
   const [result, setResult] = useState<Blob | null>(null)
+  const [realShot, setRealShot] = useState<Blob | null>(null)
+  const [showReal, setShowReal] = useState(false)
+  const [showLook, setShowLook] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [sources, setSources] = useState<WearPiece[]>([])
   const [madeFrom, setMadeFrom] = useState<string[]>([])
   const [making, setMaking] = useState(false)
@@ -85,8 +95,6 @@ export function ClosetPage() {
   nudgesRef.current = nudges
   bodyRef.current = body
   garmentsRef.current = garments
-  const resultRef = useRef<HTMLElement>(null)
-
   const slots = slotsFor(shelf)
   const categoryValue = slots.includes(category) ? category : slots[0]
   const owned = garments.filter((item) => item.status === 'owned')
@@ -123,9 +131,23 @@ export function ClosetPage() {
     })
     .join('|')
 
+  const outfitKey = currentIds.join('|')
+
   useEffect(() => {
-    if (result) resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-  }, [result])
+    const ids = outfitKey ? outfitKey.split('|') : []
+    setPickOrder((current) => {
+      const kept = current.filter((id) => ids.includes(id))
+      const added = ids.filter((id) => !kept.includes(id))
+      const next = [...kept, ...added]
+      if (next.length === current.length && next.every((id, index) => id === current[index])) return current
+      return next
+    })
+  }, [outfitKey])
+
+  const lookPieces = useMemo(
+    () => sources.map((piece) => ({ key: `${piece.role}-${piece.name}`, blob: piece.blob })),
+    [sources],
+  )
 
   useEffect(() => {
     if (!body || body.person) {
@@ -398,10 +420,11 @@ export function ClosetPage() {
 
   function enqueueSticker(item: Garment, manual = false) {
     const profile = bodyRef.current
+    if (item.category === 'jewelry') return
     if (!profile?.person) return
     if (stickerCurrent(item, profile.updatedAt)) return
-    if (!manual && item.stickerBlob) return
-    if (stickerInflight.has(item.id) || queueRef.current.some((queued) => queued.id === item.id)) return
+    if (!manual && item.stickerBlob && !placedJewelry(item.category)) return
+    if (stickerJobBusy(item.id) || stickerInflight.has(item.id) || queueRef.current.some((queued) => queued.id === item.id)) return
     queueRef.current.push(item)
     void drainStickers()
   }
@@ -414,14 +437,17 @@ export function ClosetPage() {
         const next = queueRef.current.shift()
         if (!next) break
         const profile = bodyRef.current
-        if (!profile?.person || stickerInflight.has(next.id)) continue
+        if (!profile?.person || stickerInflight.has(next.id) || !claimStickerJob(next.id)) continue
         const latest = garmentsRef.current.find((garment) => garment.id === next.id) ?? next
-        if (stickerCurrent(latest, profile.updatedAt)) continue
+        if (stickerCurrent(latest, profile.updatedAt)) {
+          releaseStickerJob(next.id)
+          continue
+        }
         stickerInflight.add(latest.id)
         setSticking(latest.id)
         setStickerError((current) => (current?.id === latest.id ? null : current))
         try {
-          const worn = await generateGarmentSticker({
+          const worn = await buildGarmentSticker({
             bodyBlob: profile.imageBlob,
             productBlob: latest.cutoutBlob,
             category: latest.category,
@@ -448,6 +474,7 @@ export function ClosetPage() {
             setStickerError({ id: latest.id, text: `${garmentLabel(latest.name)}：${wearError(cause)}` })
           }
         } finally {
+          releaseStickerJob(latest.id)
           stickerInflight.delete(latest.id)
           setSticking(null)
         }
@@ -461,10 +488,10 @@ export function ClosetPage() {
     if (cardDragged.current) return
     const selected = picked[item.category] === item.id
     if (!selected) enqueueSticker(item)
-    setPicked((current) => ({
-      ...current,
-      [item.category]: selected ? undefined : item.id,
-    }))
+    setPicked((current) => {
+      const base = selected ? current : withoutDressConflict(current, item.category)
+      return { ...base, [item.category]: selected ? undefined : item.id }
+    })
   }
 
   async function takeFile(file: File) {
@@ -484,6 +511,9 @@ export function ClosetPage() {
 
   useEffect(() => {
     if (!body?.person) return
+    for (const item of garments) {
+      if (placedJewelry(item.category)) enqueueSticker(item)
+    }
     for (const slot of CATEGORY_ORDER) {
       const item = garments.find(
         (garment) => garment.status === 'owned' && garment.id === picked[slot] && garment.category === slot,
@@ -501,7 +531,7 @@ export function ClosetPage() {
     let saved: Garment
     try {
       if (!pending.flatLay) product = await generateFlatLay({ category: categoryValue, name: label, blob: pending.originalBlob })
-      product = await isolateProductCutout(product)
+      product = await isolateProductCutout(product, categoryValue)
       const color = dominantColor(await blobToCanvas(product))
       const season = shelf === 'accessory' ? undefined : shelf
       saved = await addGarment({
@@ -528,7 +558,7 @@ export function ClosetPage() {
     stickerInflight.add(saved.id)
     setSticking(saved.id)
     try {
-      const worn = await generateGarmentSticker({
+      const worn = await buildGarmentSticker({
         bodyBlob: body.imageBlob,
         productBlob: product,
         category: categoryValue,
@@ -546,10 +576,10 @@ export function ClosetPage() {
       setName('')
       setStickerError((current) => (current?.id === saved.id ? null : current))
       if (!stored?.stickerBlob) {
-        notify('衣服已放进衣橱，贴合图层这次没做成')
+        notify(placedJewelry(categoryValue) ? '首饰已放进衣橱，这次没摆上去' : '衣服已放进衣橱，贴合图层这次没做成')
         return
       }
-      notify('已放进衣橱，贴合图层按这个人的身材做好了')
+      notify(placedJewelry(categoryValue) ? '已放进衣橱，按位置摆到模特身上了' : '已放进衣橱，贴合图层按这个人的身材做好了')
     } catch (cause) {
       setPending(null)
       setName('')
@@ -557,10 +587,10 @@ export function ClosetPage() {
       const profileNow = bodyRef.current
       if (savedNow && profileNow?.person && stickerCurrent(savedNow, profileNow.updatedAt)) {
         setStickerError((current) => (current?.id === saved.id ? null : current))
-        notify('已放进衣橱，贴合图层按这个人的身材做好了')
+        notify(placedJewelry(categoryValue) ? '已放进衣橱，按位置摆到模特身上了' : '已放进衣橱，贴合图层按这个人的身材做好了')
       } else {
         setUploadError(`${garmentLabel(saved.name)}：${wearError(cause)}`)
-        notify('衣服已放进衣橱，贴合图层这次没做成')
+        notify(placedJewelry(categoryValue) ? '首饰已放进衣橱，这次没摆上去' : '衣服已放进衣橱，贴合图层这次没做成')
       }
     } finally {
       stickerInflight.delete(saved.id)
@@ -591,6 +621,8 @@ export function ClosetPage() {
       setWearProblem('先把这套衣服的贴合图层做完，再生成全身效果。')
       return
     }
+    const wristOrder = wristWearOrder(chosen, pickOrder)
+    setWristSaved(wristOrder)
     setMaking(true)
     setWearProblem('')
     setSources(pieces)
@@ -602,9 +634,13 @@ export function ClosetPage() {
         bodyLabel: BODY_LABEL[body.bodyType],
         person: Boolean(body.person),
         pieces,
+        ...(wristOrder.length === 2 ? { wristOrder } : {}),
       })
       setResult(image)
       setMadeFrom(currentIds)
+      setRealShot(null)
+      setShowReal(false)
+      setShowLook(true)
     } catch (cause) {
       setWearProblem(wearError(cause))
     } finally {
@@ -626,8 +662,10 @@ export function ClosetPage() {
         person: Boolean(body.person),
         pieces: sources,
         adjust: instruction,
+        ...(wristSaved.length === 2 ? { wristOrder: wristSaved } : {}),
       })
       setResult(image)
+      setShowLook(true)
     } catch (cause) {
       setWearProblem(wearError(cause))
     } finally {
@@ -636,9 +674,26 @@ export function ClosetPage() {
   }
 
   async function save() {
-    if (!result || madeFrom.length === 0) return
-    await addLook({ mode: 'closet', garmentIds: madeFrom, imageBlob: result })
-    notify('已保存这套搭配')
+    const shown = showReal && realShot ? realShot : result
+    if (!shown || madeFrom.length === 0 || saving) return
+    setSaving(true)
+    try {
+      const poster = lookPieces.length > 0 ? await composeLookPoster({ photo: shown, pieces: lookPieces }) : shown
+      await addLook({ mode: 'closet', garmentIds: madeFrom, imageBlob: poster })
+      setShowLook(false)
+      setNav('looks')
+      window.scrollTo(0, 0)
+      notify('已保存这套搭配')
+    } catch {
+      notify('这套搭配这次没存下来')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function takeReal(file: File) {
+    setRealShot(file)
+    setShowReal(true)
   }
 
   const placedStickers = body?.person ? chosen.filter((item) => stickerAligned(item, body.updatedAt)).length : 0
@@ -654,18 +709,46 @@ export function ClosetPage() {
   if (!body) mixHint = '先建立身形，衣服才能穿到个人模特上。'
   else if (!body.person) mixHint = '当前是比例参考。贴合图层和全身效果都要用带本人脸的个人模特。'
   else if (chosen.length === 0) mixHint = '点左边已经做好贴合图层的单品，会立刻贴到个人模特上。'
-  else if (sticking) mixHint = '正在按这个人的肩、腰、手脚生成这一件的透明图层。这一件用一张额度。'
-  else if (driftedStickers > 0) mixHint = '身材改过之后，以前的贴合图层对不齐。点「重做贴合图层」才会按现在的个人模特重做，一件用一张额度。'
-  else if (missingStickers > 0) mixHint = '选中的衣服里还有没做过贴合图层的。点「做成贴合图层」才会生成，一件用一张额度。'
+  else if (sticking) {
+    const working = garments.find((item) => item.id === sticking)
+    mixHint = working && placedJewelry(working.category) ? '正在按这个模特记好的佩戴位置生成贴纸，不调用模型。' : '正在按这个人的肩、腰、手脚生成这一件的透明图层。这一件用一张额度。'
+  } else if (driftedStickers > 0) {
+    const paid = chosen.some((item) => item.stickerBlob && item.stickerFor != null && body && item.stickerFor !== body.updatedAt && !placedJewelry(item.category))
+    mixHint = paid
+      ? '身材改过之后，以前的贴合图层对不齐。点「重做贴合图层」才会按现在的个人模特重做，一件用一张额度。'
+      : '身材改过之后，首饰要按现在的位置重新摆。点「重新摆放」，不调用模型。'
+  } else if (missingStickers > 0) {
+    const paid = chosen.some((item) => !item.stickerBlob && !placedJewelry(item.category))
+    mixHint = paid ? '选中的衣服里还有没做过贴合图层的。点「做成贴合图层」才会生成，一件用一张额度。' : '选中的首饰还没摆到身上。点「摆到身上」，不调用模型。'
+  }
   else if (placedStickers === chosen.length) mixHint = '存好的贴合图层已经盖在个人模特上。可以拖动。偏了就点还原位置。'
   else if (chosen.length > maxGarments()) mixHint = `一次最多搭配 ${maxGarments()} 件，先拿下几件。`
-  else if (!outfitReady) mixHint = '点上一件上衣，再点裤子或裙子，就可以生成全身照。只点连衣裙也可以。'
+  else if (!outfitReady) mixHint = '点上一件上衣，再点裤子或裙子，就可以生成全身照。裤子和裙子只能选一个。连衣裙相当于上衣加裤子，不能和上衣、裤子或裙子一起选。'
   else if (result && !sameOutfit) mixHint = '基准图上已经换成新的单品。再点搭配，才会生成新的全身照。'
 
-  const stackedLayers = [...layers].sort((a, b) => STACK.indexOf(a.category) - STACK.indexOf(b.category))
+  const stackedLayers = raiseSecondWrist(
+    [...layers].sort((a, b) => STACK.indexOf(a.category) - STACK.indexOf(b.category)),
+    pickOrder,
+  )
+  const wristShift =
+    body && layers.length > 0
+      ? secondWristShift(
+          layers,
+          pickOrder,
+          (id) => {
+            const layer = layers.find((item) => item.id === id)
+            if (!layer || layer.refit) return 1
+            return (nudges[id] ?? { dx: 0, dy: 0, scale: 1 }).scale
+          },
+          body.marks,
+          layers[0].baseWidth,
+          layers[0].baseHeight,
+        )
+      : null
 
   return (
-    <div className="closet">
+    <>
+    <div className="closet" inert={showLook || undefined}>
       <div className="closet-bar">
         <div>
           <p className="kicker">已有的单品</p>
@@ -763,12 +846,16 @@ export function ClosetPage() {
               {pending.flatLay
                 ? '保存时直接用这张图，不再调用模型。'
                 : '穿着拍、衣服单拍或网店上身图都会整理成白底平铺，用一张额度。'}
-              {body?.person ? ' 然后按个人模特生成这一件的贴合图层，再用一张额度。' : ''}
+              {body?.person
+                ? placedJewelry(categoryValue)
+                  ? ' 项链、耳钉、手链和手表直接摆到对应位置，不再调用上身模型。'
+                  : ' 然后按个人模特生成这一件的贴合图层，再用一张额度。'
+                : ''}
             </p>
             {uploadError ? <p className="error">{uploadError}</p> : null}
             <div className="pending-actions">
               <button type="button" className="primary" onClick={() => void commit()} disabled={Boolean(sticking) || filing}>
-                {filing ? (pending.flatLay ? '正在保存…' : '正在整理成白底平铺…') : sticking ? '正在生成贴合图层…' : '放进衣橱'}
+                {filing ? (pending.flatLay ? '正在保存…' : '正在整理成白底平铺…') : sticking ? (placedJewelry(categoryValue) ? '正在摆到身上…' : '正在生成贴合图层…') : '放进衣橱'}
               </button>
               <button type="button" className="ghost" onClick={cancel}>
                 取消
@@ -817,14 +904,24 @@ export function ClosetPage() {
                           </span>
                         </button>
                         <div className="card-actions">
-                          {body?.person && !stickerReady(item) ? (
+                          {body?.person && item.category !== 'jewelry' && !stickerReady(item) ? (
                             <button
                               type="button"
                               className="text-button"
                               disabled={sticking === item.id}
                               onClick={() => enqueueSticker(item, true)}
                             >
-                              {sticking === item.id ? '正在生成…' : item.stickerBlob ? '重做贴合图层' : '做成贴合图层'}
+                              {sticking === item.id
+                                ? placedJewelry(item.category)
+                                  ? '正在摆放…'
+                                  : '正在生成…'
+                                : placedJewelry(item.category)
+                                  ? item.stickerBlob
+                                    ? '重新摆放'
+                                    : '摆到身上'
+                                  : item.stickerBlob
+                                    ? '重做贴合图层'
+                                    : '做成贴合图层'}
                             </button>
                           ) : null}
                           <button type="button" className="text-button" onClick={() => void remove(item.id, garmentLabel(item.name))}>
@@ -850,6 +947,7 @@ export function ClosetPage() {
                   <BlobImg blob={body.imageBlob} alt="基准图" className="base-photo" />
                   {stackedLayers.map((layer, index) => {
                     const nudge = layer.refit ? { dx: 0, dy: 0, scale: 1 } : nudgeOf(layer.id)
+                    const lift = wristShift?.id === layer.id ? wristShift : null
                     const active = layer.id === activeSticker
                     return (
                       <div
@@ -858,8 +956,8 @@ export function ClosetPage() {
                         role="button"
                         aria-label={`拖动${CATEGORY_LABEL[layer.category]}`}
                         style={{
-                          left: `${((layer.frame.x + nudge.dx) / layer.baseWidth) * 100}%`,
-                          top: `${((layer.frame.y + nudge.dy) / layer.baseHeight) * 100}%`,
+                          left: `${((layer.frame.x + nudge.dx + (lift?.dx ?? 0)) / layer.baseWidth) * 100}%`,
+                          top: `${((layer.frame.y + nudge.dy + (lift?.dy ?? 0)) / layer.baseHeight) * 100}%`,
                           width: `${((layer.frame.width * nudge.scale) / layer.baseWidth) * 100}%`,
                           height: `${((layer.frame.height * nudge.scale) / layer.baseHeight) * 100}%`,
                           zIndex: index + 1,
@@ -941,6 +1039,11 @@ export function ClosetPage() {
             <button type="button" className="primary" disabled={!canGenerate} onClick={() => void generate()}>
               {making ? '正在生成全身照片…' : '搭配'}
             </button>
+            {result ? (
+              <button type="button" className="ghost" onClick={() => setShowLook(true)}>
+                查看这套搭配
+              </button>
+            ) : null}
             {wearProblem && !result ? <p className="error">{wearProblem}</p> : null}
           </>
         ) : (
@@ -953,40 +1056,58 @@ export function ClosetPage() {
         )}
       </aside>
       </div>
-
-      {result && body ? (
-        <section className="mix-result" ref={resultRef}>
-          <figure className="stage">
-            <BlobImg blob={result} alt="搭配效果" />
-            <figcaption>日常搭配</figcaption>
-          </figure>
-          <div>
-            <div className="ref-strip">
-              <figure>
-                <BlobImg blob={body.imageBlob} alt="身形" />
-                <figcaption>身形</figcaption>
-              </figure>
-              {sources.map((piece) => (
-                <figure key={`${piece.role}-${piece.name}`}>
-                  <BlobImg blob={piece.blob} alt={garmentLabel(piece.name)} />
-                  <figcaption>{garmentLabel(piece.name)}</figcaption>
-                </figure>
-              ))}
-            </div>
-            <p className="recipe">{sources.map((piece) => garmentLabel(piece.name)).join('  +  ')}</p>
-            <p className="hint">
-              {sameOutfit
-                ? '这是按个人模特的脸和身材，参考这些商品图生成的全身照。'
-                : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
-            </p>
-            <AdjustNote value={note} busy={making} onChange={setNote} onSubmit={() => void revise()} />
-            {wearProblem ? <p className="error">{wearProblem}</p> : null}
-            <button type="button" className="primary" onClick={() => void save()}>
-              保存这套搭配
-            </button>
-          </div>
-        </section>
-      ) : null}
     </div>
+
+      {showLook && result && body ? (
+        <div className="look-cover" role="region" aria-label="日常搭配">
+          <div className="look-cover-inner">
+            <div className="look-toolbar">
+              <button type="button" className="text-button look-back" onClick={() => setShowLook(false)}>
+                返回衣橱
+              </button>
+              {realShot ? (
+                <div className="look-switch">
+                  <button type="button" className={showReal ? 'chip' : 'chip selected'} onClick={() => setShowReal(false)}>
+                    生成图
+                  </button>
+                  <button type="button" className={showReal ? 'chip selected' : 'chip'} onClick={() => setShowReal(true)}>
+                    实拍
+                  </button>
+                </div>
+              ) : null}
+              <label className="upload-mini">
+                <input
+                  type="file"
+                  accept="image/*"
+                  hidden
+                  onChange={(event) => {
+                    const file = event.target.files?.[0]
+                    event.target.value = ''
+                    if (file) takeReal(file)
+                  }}
+                />
+                {realShot ? '更换实拍' : '上传实拍'}
+              </label>
+            </div>
+            <figure className="look-photo">
+              <BlobImg blob={showReal && realShot ? realShot : result} alt="搭配效果" />
+            </figure>
+            <div className="look-follow">
+              <p className="recipe">{sources.map((piece) => garmentLabel(piece.name)).join('  +  ')}</p>
+              <p className="hint">
+                {sameOutfit
+                  ? '这是按个人模特的脸和身材生成的全身照。上传实拍后，中间可以换成自己穿着这套的照片。保存之后，穿搭页会放一张中间是这套全身照、两侧是单品的图。'
+                  : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
+              </p>
+              <AdjustNote value={note} busy={making} onChange={setNote} onSubmit={() => void revise()} />
+              {wearProblem ? <p className="error">{wearProblem}</p> : null}
+              <button type="button" className="primary" disabled={saving || making} onClick={() => void save()}>
+                {saving ? '正在做成穿搭页的图片…' : '保存这套搭配'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   )
 }

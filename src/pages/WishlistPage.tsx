@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react'
 import { AdjustNote, BlobImg } from '../components.tsx'
-import { blobToCanvas, compositeLook, dominantColor, isolateProductCutout, stickerLayer, type StickerFrame } from '../imaging.ts'
+import { blobToCanvas, compositeLook, dominantColor, isolateProductCutout, raiseSecondWrist, secondWristShift, stickerLayer, type StickerFrame } from '../imaging.ts'
 import { addedOrder, garmentLabel, isClothingCategory, nextGarmentName, relocatedGarmentName } from '../garment-name.ts'
 import { maxGarments } from '../model-config.ts'
 import { useWardrobe } from '../store.tsx'
@@ -11,19 +11,23 @@ import {
   CATEGORY_ORDER,
   CLOTHING_ORDER,
   canMakeOutfit,
+  dressConflicts,
+  withoutDressConflict,
   SEASON_LABEL,
   SEASON_ORDER,
   stickerAligned,
   stickerCurrent,
+  placedJewelry,
   stickerVersionFor,
+  wristWearOrder,
   type Category,
   type Garment,
   type Season,
 } from '../types.ts'
-import { generateFlatLay, generateGarmentSticker, generateWearPhoto, wearError, type WearPiece } from '../wear.ts'
+import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateWearPhoto, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
 
 const stickerInflight = new Set<string>()
-const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'outer', 'scarf', 'jewelry', 'hat', 'glasses', 'bag']
+const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'scarf', 'necklace', 'earrings', 'jewelry', 'bracelet', 'watch', 'hat', 'glasses', 'bag']
 
 type Shelf = Season | 'accessory'
 type Nudge = { dx: number; dy: number; scale: number }
@@ -48,6 +52,8 @@ function slotsFor(shelf: Shelf): Category[] {
 export function WishlistPage() {
   const { body, garments, addGarment, updateGarment, deleteGarment, addLook, notify, setNav } = useWardrobe()
   const [picked, setPicked] = useState<Partial<Record<Category, string>>>({})
+  const [pickOrder, setPickOrder] = useState<string[]>([])
+  const [wristSaved, setWristSaved] = useState<Array<'watch' | 'bracelet'>>([])
   const [tryOn, setTryOn] = useState<Partial<Record<Category, string>>>({})
   const [covered, setCovered] = useState<Partial<Record<Category, string>>>({})
   const [stage, setStage] = useState(false)
@@ -144,6 +150,17 @@ export function WishlistPage() {
       ? stickerError.text
       : ''
   const onBodyKey = onBody.map((item) => item.id).join('|')
+
+  useEffect(() => {
+    const ids = onBodyKey ? onBodyKey.split('|') : []
+    setPickOrder((current) => {
+      const kept = current.filter((id) => ids.includes(id))
+      const added = ids.filter((id) => !kept.includes(id))
+      const next = [...kept, ...added]
+      if (next.length === current.length && next.every((id, index) => id === current[index])) return current
+      return next
+    })
+  }, [onBodyKey])
 
   useEffect(() => {
     if (result) resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -378,10 +395,11 @@ export function WishlistPage() {
 
   function enqueueSticker(item: Garment, manual = false) {
     const profile = bodyRef.current
+    if (item.category === 'jewelry') return
     if (!profile?.person) return
     if (stickerCurrent(item, profile.updatedAt)) return
-    if (!manual && item.stickerBlob) return
-    if (stickerInflight.has(item.id) || queueRef.current.some((queued) => queued.id === item.id)) return
+    if (!manual && item.stickerBlob && !placedJewelry(item.category)) return
+    if (stickerJobBusy(item.id) || stickerInflight.has(item.id) || queueRef.current.some((queued) => queued.id === item.id)) return
     queueRef.current.push(item)
     void drainStickers()
   }
@@ -394,14 +412,17 @@ export function WishlistPage() {
         const next = queueRef.current.shift()
         if (!next) break
         const profile = bodyRef.current
-        if (!profile?.person || stickerInflight.has(next.id)) continue
+        if (!profile?.person || stickerInflight.has(next.id) || !claimStickerJob(next.id)) continue
         const latest = garmentsRef.current.find((garment) => garment.id === next.id) ?? next
-        if (stickerCurrent(latest, profile.updatedAt)) continue
+        if (stickerCurrent(latest, profile.updatedAt)) {
+          releaseStickerJob(next.id)
+          continue
+        }
         stickerInflight.add(latest.id)
         setSticking(latest.id)
         setStickerError((current) => (current?.id === latest.id ? null : current))
         try {
-          const wornSticker = await generateGarmentSticker({
+          const wornSticker = await buildGarmentSticker({
             bodyBlob: profile.imageBlob,
             productBlob: latest.cutoutBlob,
             category: latest.category,
@@ -428,6 +449,7 @@ export function WishlistPage() {
             setStickerError({ id: latest.id, text: `${garmentLabel(latest.name)}：${wearError(cause)}` })
           }
         } finally {
+          releaseStickerJob(latest.id)
           stickerInflight.delete(latest.id)
           setSticking(null)
         }
@@ -445,19 +467,27 @@ export function WishlistPage() {
     if (cardDragged.current) return
     const on = picked[item.category] === item.id
     if (!on) enqueueSticker(item)
-    setPicked((current) => ({
-      ...current,
-      [item.category]: on ? undefined : item.id,
-    }))
+    setPicked((current) => {
+      const base = on ? current : withoutDressConflict(current, item.category)
+      return { ...base, [item.category]: on ? undefined : item.id }
+    })
   }
 
   function toggleOwned(item: Garment) {
     const selectedCover = covered[item.category] === item.id
     if (!selectedCover) enqueueSticker(item)
-    setCovered((current) => ({
-      ...current,
-      [item.category]: selectedCover ? undefined : item.id,
-    }))
+    const clashes = dressConflicts(item.category)
+    if (!selectedCover && clashes.length > 0) {
+      setTryOn((current) => {
+        const next = { ...current }
+        for (const slot of clashes) next[slot] = undefined
+        return next
+      })
+    }
+    setCovered((current) => {
+      const base = selectedCover ? current : withoutDressConflict(current, item.category)
+      return { ...base, [item.category]: selectedCover ? undefined : item.id }
+    })
   }
 
   function beginDrag(event: DragEvent, item: Garment) {
@@ -530,7 +560,7 @@ export function WishlistPage() {
     setUploadError('')
     try {
       const flat = pending.flatLay ? pending.originalBlob : await generateFlatLay({ category, name: label, blob: pending.originalBlob })
-      const product = await isolateProductCutout(flat)
+      const product = await isolateProductCutout(flat, category)
       const color = dominantColor(await blobToCanvas(product))
       const clothing = isClothingCategory(category)
       const season = clothing ? (shelf === 'accessory' ? 'summer' : shelf) : undefined
@@ -564,8 +594,12 @@ export function WishlistPage() {
     const nextId = moved?.id ?? item.id
     setPicked((current) => ({ ...current, [item.category]: current[item.category] === item.id ? undefined : current[item.category] }))
     if (stage && tryOn[item.category] === item.id) {
-      setTryOn((current) => ({ ...current, [item.category]: undefined }))
-      setCovered((current) => ({ ...current, [item.category]: nextId }))
+      setTryOn((current) => {
+        const next = withoutDressConflict(current, item.category)
+        next[item.category] = undefined
+        return next
+      })
+      setCovered((current) => ({ ...withoutDressConflict(current, item.category), [item.category]: nextId }))
     }
     notify('已转入衣橱')
   }
@@ -600,6 +634,8 @@ export function WishlistPage() {
       setWearProblem('先把这套衣服的贴合图层做完，再生成全身效果。')
       return
     }
+    const wristOrder = wristWearOrder(worn, pickOrder)
+    setWristSaved(wristOrder)
     setMaking(true)
     setWearProblem('')
     setSources(pieces)
@@ -611,6 +647,7 @@ export function WishlistPage() {
         bodyLabel: BODY_LABEL[body.bodyType],
         person: Boolean(body.person),
         pieces,
+        ...(wristOrder.length === 2 ? { wristOrder } : {}),
       })
       setResult(image)
       setMadeFrom(currentIds)
@@ -635,6 +672,7 @@ export function WishlistPage() {
         person: Boolean(body.person),
         pieces: sources,
         adjust: instruction,
+        ...(wristSaved.length === 2 ? { wristOrder: wristSaved } : {}),
       })
       setResult(image)
     } catch (cause) {
@@ -650,13 +688,34 @@ export function WishlistPage() {
     notify('已保存这次试穿')
   }
 
-  const stackedLayers = [...layers].sort((a, b) => STACK.indexOf(a.category) - STACK.indexOf(b.category))
+  const stackedLayers = raiseSecondWrist(
+    [...layers].sort((a, b) => STACK.indexOf(a.category) - STACK.indexOf(b.category)),
+    pickOrder,
+  )
+  const wristShift =
+    body && layers.length > 0
+      ? secondWristShift(
+          layers,
+          pickOrder,
+          (id) => {
+            const layer = layers.find((item) => item.id === id)
+            if (!layer || layer.refit) return 1
+            return (nudges[id] ?? { dx: 0, dy: 0, scale: 1 }).scale
+          },
+          body.marks,
+          layers[0].baseWidth,
+          layers[0].baseHeight,
+        )
+      : null
   let mixHint = '点左边衣橱里的衣服，会用已经做好的贴合图层盖到个人模特上。同一类再点一次，就露出试穿的那件。'
   if (!body) mixHint = '先建立身形，衣服才能穿到个人模特上。'
   else if (!body.person) mixHint = '当前是比例参考。贴合图层和全身效果都要用带本人脸的个人模特。'
-  else if (sticking) mixHint = '正在按这个人的肩、腰、手脚生成这一件的透明图层。这一件用一张额度。'
+  else if (sticking) {
+    const working = garments.find((item) => item.id === sticking)
+    mixHint = working && placedJewelry(working.category) ? '正在按这个模特记好的佩戴位置生成贴纸，不调用模型。' : '正在按这个人的肩、腰、手脚生成这一件的透明图层。这一件用一张额度。'
+  }
   else if (worn.length > maxGarments()) mixHint = `一次最多搭配 ${maxGarments()} 件，先拿下几件。`
-  else if (!outfitReady) mixHint = '点上一件上衣，再点裤子或裙子，就可以生成全身照。只点连衣裙也可以。缺的可以从左边衣橱点上。'
+  else if (!outfitReady) mixHint = '点上一件上衣，再点裤子或裙子，就可以生成全身照。裤子和裙子只能选一个。连衣裙相当于上衣加裤子，不能和上衣、裤子或裙子一起选。缺的可以从左边衣橱点上。'
   else if (result && !sameOutfit) mixHint = '身上的单品已经换了。再点搭配，才会生成新的全身照。'
   else mixHint = '这是贴合图层盖在个人模特上的预览。全身效果再点搭配。'
 
@@ -664,8 +723,15 @@ export function WishlistPage() {
   if (!body) pickHint = '还没有基准图。可以先把衣服放进想买，建立身形之后再试穿。'
   else if (!body.person) pickHint = '当前是比例参考。点选会盖到基准图上。贴合图层要等带本人脸的个人模特。'
   else if (selected.length === 0) pickHint = '点左边还没买的单品。有贴合图层的会直接盖到个人模特上。每一类只留一件。'
-  else if (sticking) pickHint = '正在按这个人的肩、腰、手脚生成这一件的透明图层。这一件用一张额度。'
-  else if (pendingStickers > 0) pickHint = `选中的衣服里还有 ${pendingStickers} 件没有贴合图层。点「做成贴合图层」才会生成，一件用一张额度。已经做好的直接贴上。`
+  else if (sticking) {
+    const working = garments.find((item) => item.id === sticking)
+    pickHint = working && placedJewelry(working.category) ? '正在按这个模特记好的佩戴位置生成贴纸，不调用模型。' : '正在按这个人的肩、腰、手脚生成这一件的透明图层。这一件用一张额度。'
+  } else if (pendingStickers > 0) {
+    const paid = onBody.some((item) => body && !stickerAligned(item, body.updatedAt) && !placedJewelry(item.category))
+    pickHint = paid
+      ? `选中的衣服里还有 ${pendingStickers} 件没有贴合图层。点「做成贴合图层」才会生成，一件用一张额度。已经做好的直接贴上。`
+      : '选中的首饰还没摆到身上。点「摆到身上」，不调用模型。已经摆好的直接贴上。'
+  }
   else pickHint = '贴合图层已经盖在个人模特上。可以拖动。点试穿后可以换成衣橱里的衣服，再生成全身照。'
 
   return (
@@ -776,7 +842,7 @@ export function WishlistPage() {
           <label>
             类别
             <select value={category} onChange={(event) => setCategory(event.target.value as Category)}>
-              {CATEGORY_ORDER.map((slot) => (
+              {CATEGORY_ORDER.filter((slot) => slot !== 'jewelry').map((slot) => (
                 <option key={slot} value={slot}>
                   {CATEGORY_LABEL[slot]}
                 </option>
@@ -794,8 +860,12 @@ export function WishlistPage() {
             </label>
             <p className="hint">
               {pending.flatLay
-                ? '保存时直接用这张图，不再调用模型。点选后可以按个人模特生成贴合图层。'
-                : '穿着拍、衣服单拍或网店上身图都会整理成白底平铺，用一张额度。贴合图层在点选或点「做成贴合图层」时再生成。'}
+                ? placedJewelry(category)
+                  ? '保存时直接用这张图，不再调用模型。点选后按脖子、耳朵或手腕摆上去，也不调用上身模型。'
+                  : '保存时直接用这张图，不再调用模型。点选后可以按个人模特生成贴合图层。'
+                : placedJewelry(category)
+                  ? '穿着拍或商品图会整理成白底平铺，用一张额度。点选后直接摆到身上，不再调用上身模型。'
+                  : '穿着拍、衣服单拍或网店上身图都会整理成白底平铺，用一张额度。贴合图层在点选或点「做成贴合图层」时再生成。'}
             </p>
             {uploadError ? <p className="error">{uploadError}</p> : null}
             <div className="pending-actions">
@@ -890,14 +960,24 @@ export function WishlistPage() {
                                   </span>
                                 </button>
                                 <div className="card-actions">
-                                  {body?.person && !stickerReady(item) ? (
+                                  {body?.person && item.category !== 'jewelry' && !stickerReady(item) ? (
                                     <button
                                       type="button"
                                       className="text-button"
                                       disabled={sticking === item.id}
                                       onClick={() => enqueueSticker(item, true)}
                                     >
-                                      {sticking === item.id ? '正在生成…' : item.stickerBlob ? '重做贴合图层' : '做成贴合图层'}
+                                      {sticking === item.id
+                                        ? placedJewelry(item.category)
+                                          ? '正在摆放…'
+                                          : '正在生成…'
+                                        : placedJewelry(item.category)
+                                          ? item.stickerBlob
+                                            ? '重新摆放'
+                                            : '摆到身上'
+                                          : item.stickerBlob
+                                            ? '重做贴合图层'
+                                            : '做成贴合图层'}
                                     </button>
                                   ) : null}
                                   <button type="button" className="text-button" onClick={() => void own(item)}>
@@ -927,6 +1007,7 @@ export function WishlistPage() {
                     <BlobImg blob={body.imageBlob} alt="基准图" className="base-photo" />
                     {stackedLayers.map((layer, index) => {
                       const nudge = layer.refit ? { dx: 0, dy: 0, scale: 1 } : nudgeOf(layer.id)
+                      const lift = wristShift?.id === layer.id ? wristShift : null
                       const active = layer.id === activeSticker
                       return (
                         <div
@@ -935,8 +1016,8 @@ export function WishlistPage() {
                           role="button"
                           aria-label={`拖动${CATEGORY_LABEL[layer.category]}`}
                           style={{
-                            left: `${((layer.frame.x + nudge.dx) / layer.baseWidth) * 100}%`,
-                            top: `${((layer.frame.y + nudge.dy) / layer.baseHeight) * 100}%`,
+                            left: `${((layer.frame.x + nudge.dx + (lift?.dx ?? 0)) / layer.baseWidth) * 100}%`,
+                            top: `${((layer.frame.y + nudge.dy + (lift?.dy ?? 0)) / layer.baseHeight) * 100}%`,
                             width: `${((layer.frame.width * nudge.scale) / layer.baseWidth) * 100}%`,
                             height: `${((layer.frame.height * nudge.scale) / layer.baseHeight) * 100}%`,
                             zIndex: index + 1,

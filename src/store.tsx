@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type R
 import { deleteBody, putGarment, putLook, removeGarment, removeLook, saveAccount as persistAccount, saveBody as persistBody } from './db.ts'
 import { forgetBody, forgetGarment, forgetLook, openLibrary, rememberAccount, rememberBody, rememberGarment, rememberLook } from './disk.ts'
 import { isGarmentDir } from './garment-name.ts'
+import { completeJewelryMarks } from './imaging.ts'
 import type { Account, BodyProfile, Garment, Look, View } from './types.ts'
 
 type NewGarment = Omit<Garment, 'id' | 'createdAt'>
@@ -53,9 +54,23 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
       const snapshot = await openLibrary((text) => {
         if (!cancelled) setBootText(text)
       })
+      let bodyProfile = snapshot.body
+      if (bodyProfile) {
+        if (!cancelled) setBootText('正在记下首饰的佩戴位置')
+        try {
+          const filled = await completeJewelryMarks(bodyProfile)
+          if (filled && !cancelled) {
+            await persistBody(filled)
+            await rememberBody(filled)
+            bodyProfile = filled
+          }
+        } catch {
+          bodyProfile = snapshot.body
+        }
+      }
       if (cancelled) return
       setAccount(snapshot.account)
-      setBody(snapshot.body)
+      setBody(bodyProfile)
       setGarments(snapshot.garments)
       setLooks(snapshot.looks)
       setReady(true)

@@ -7,7 +7,7 @@ import { createLibrary } from './library-server.ts'
 import { ARK_IMAGE, ARK_TASK_SIZE, IMAGE_PROVIDER, OPENROUTER_TASKS, imageTask, maxGarments, maxReferences } from './src/model-config.ts'
 
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/images'
-const ARK_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/v3/images/generations'
+const ARK_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/plan/v3/images/generations'
 
 type ImageResponse = {
   error?: { message?: string; code?: number | string }
@@ -76,7 +76,6 @@ async function arkImage(apiKey: string, task: 'avatar' | 'flatlay' | 'fitted-lay
       model: ARK_IMAGE.model,
       prompt,
       image: images.length === 1 ? images[0] : images,
-      sequential_image_generation: 'disabled',
       size: ARK_TASK_SIZE[task],
       response_format: 'b64_json',
       watermark: ARK_IMAGE.watermark,
@@ -91,7 +90,7 @@ async function handleWear(apiKey: string, req: IncomingMessage, res: ServerRespo
   }
   if (!apiKey) {
     const missing = IMAGE_PROVIDER === 'ark'
-      ? '还没有设置火山方舟 API Key。请在项目根目录的 .env 里填写 ARK_API_KEY，保存后重新运行 npm run dev。'
+      ? '还没有设置火山方舟 API Key。请把 Agent Plan 的专属 Key 填进项目根目录 .env 的 ARK_API_KEY，保存后重新运行 npm run dev。'
       : '还没有设置 OpenRouter API Key。请在项目根目录的 .env 里填写 OPENROUTER_API_KEY，保存后重新运行 npm run dev。'
     sendText(res, 401, missing)
     return

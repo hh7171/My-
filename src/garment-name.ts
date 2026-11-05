@@ -1,9 +1,9 @@
 import type { Category, GarmentStatus, Season } from './types.ts'
 
-const CLOTHING = new Set<Category>(['top', 'dress', 'skirt', 'pants', 'outer', 'shoes'])
+const CLOTHING = new Set<Category>(['top', 'dress', 'skirt', 'pants', 'shoes'])
 
 export const GARMENT_DIR =
-  /^(?:wishlist\/)?(?:spring|summer|winter|accessory)\/(top|dress|skirt|pants|outer|shoes|belt|bag|hat|scarf|glasses|jewelry|bottom|necklace|watch)\/\1\d{2,}$/
+  /^(?:wishlist\/)?(?:spring|summer|winter|accessory)\/(top|dress|skirt|pants|outer|shoes|belt|bag|hat|scarf|glasses|jewelry|bottom|necklace|earrings|bracelet|watch)\/\1\d{2,}$/
 
 export function isClothingCategory(category: Category): boolean {
   return CLOTHING.has(category)

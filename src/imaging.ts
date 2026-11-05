@@ -1,8 +1,7 @@
 import { frameFitsImage, readStickerFrame, writeStickerFrame } from './library-mark.ts'
-import type { Adjustments, BodyMarks, BodyType, Category, Point, StickerFrame } from './types.ts'
+import { placedJewelry, ZERO_ADJUSTMENTS, type Adjustments, type BodyMarks, type BodyProfile, type BodyType, type Category, type Point, type StickerFrame } from './types.ts'
 export type { StickerFrame }
-import { ZERO_ADJUSTMENTS } from './types.ts'
-import { detectMarks, segmentPerson } from './vision.ts'
+import { detectMarks, jewelryPoints, segmentPerson, wristWearPoint } from './vision.ts'
 
 export const FRAME_W = 768
 export const FRAME_H = 1152
@@ -136,12 +135,7 @@ export function fitImageToFrame(
     height,
   )
   context.drawImage(source, dx, dy, width, height)
-  const keys = Object.keys(marks) as (keyof BodyMarks)[]
-  const fitted = {} as BodyMarks
-  for (const key of keys) {
-    fitted[key] = { x: dx + marks[key].x * scale, y: dy + marks[key].y * scale }
-  }
-  return { canvas, marks: fitted }
+  return { canvas, marks: mapMarkPoints(marks, (point) => ({ x: dx + point.x * scale, y: dy + point.y * scale })) }
 }
 
 export function paintStudio(person: HTMLCanvasElement): HTMLCanvasElement {
@@ -172,7 +166,7 @@ function guessMarks(source: HTMLCanvasElement): BodyMarks {
     x: cx + xFactor * width,
     y: top + yFactor * height,
   })
-  return {
+  const marks: BodyMarks = {
     nose: at(0, 0.1),
     neck: at(0, 0.16),
     lShoulder: at(-0.18, 0.2),
@@ -188,6 +182,7 @@ function guessMarks(source: HTMLCanvasElement): BodyMarks {
     lAnkle: at(-0.09, 0.96),
     rAnkle: at(0.09, 0.96),
   }
+  return { ...marks, ...jewelryPoints(marks.nose, marks.neck, marks.lShoulder, marks.rShoulder) }
 }
 
 export type PreparedBody = {
@@ -254,6 +249,8 @@ function orientMarks(marks: BodyMarks): BodyMarks {
     ;[next.lShoulder, next.rShoulder] = [next.rShoulder, next.lShoulder]
     ;[next.lElbow, next.rElbow] = [next.rElbow, next.lElbow]
     ;[next.lWrist, next.rWrist] = [next.rWrist, next.lWrist]
+    if (next.lEar && next.rEar) [next.lEar, next.rEar] = [next.rEar, next.lEar]
+    if (next.neckLeft && next.neckRight) [next.neckLeft, next.neckRight] = [next.neckRight, next.neckLeft]
   }
   if (next.lHip.x > next.rHip.x) {
     ;[next.lHip, next.rHip] = [next.rHip, next.lHip]
@@ -378,10 +375,7 @@ function warpPerson(
       y: field.dstY(point.y),
     }
   }
-  const keys = Object.keys(oriented) as (keyof BodyMarks)[]
-  const mapped = {} as BodyMarks
-  for (const key of keys) mapped[key] = mapPoint(oriented[key])
-  return { canvas: output, marks: mapped }
+  return { canvas: output, marks: mapMarkPoints(oriented, mapPoint) }
 }
 
 function fitIntoFrame(person: HTMLCanvasElement, marks: BodyMarks): { canvas: HTMLCanvasElement; marks: BodyMarks } {
@@ -396,10 +390,7 @@ function fitIntoFrame(person: HTMLCanvasElement, marks: BodyMarks): { canvas: HT
   context.setTransform(scale, 0, 0, scale, dx, dy)
   context.drawImage(person, 0, 0)
   const mapPoint = (point: Point): Point => ({ x: point.x * scale + dx, y: point.y * scale + dy })
-  const keys = Object.keys(marks) as (keyof BodyMarks)[]
-  const fitted = {} as BodyMarks
-  for (const key of keys) fitted[key] = mapPoint(marks[key])
-  return { canvas: frame, marks: fitted }
+  return { canvas: frame, marks: mapMarkPoints(marks, mapPoint) }
 }
 
 function placeWarpedStudio(
@@ -428,10 +419,7 @@ function placeWarpedStudio(
     height,
   )
   context.drawImage(person, dx, dy, width, height)
-  const keys = Object.keys(marks) as (keyof BodyMarks)[]
-  const fitted = {} as BodyMarks
-  for (const key of keys) fitted[key] = { x: marks[key].x * scale + dx, y: marks[key].y * scale + dy }
-  return { canvas, marks: fitted }
+  return { canvas, marks: mapMarkPoints(marks, (point) => ({ x: point.x * scale + dx, y: point.y * scale + dy })) }
 }
 
 export async function renderAdjusted(
@@ -697,6 +685,153 @@ function dropDistantLightIslands(pixels: Uint8ClampedArray, width: number, heigh
   return removed
 }
 
+function clearEnclosedBackdrop(pixels: Uint8ClampedArray, width: number, height: number, background: Rgb): number {
+  const count = width * height
+  const pale = new Uint8Array(count)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x
+      if (pixels[index * 4 + 3] < 16) continue
+      if (smoothPaleBackdrop(pixels, width, height, x, y, background)) pale[index] = 1
+    }
+  }
+  const outside = new Uint8Array(count)
+  const queueX = new Int32Array(count)
+  const queueY = new Int32Array(count)
+  let head = 0
+  let tail = 0
+  const pushOutside = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return
+    const index = y * width + x
+    if (outside[index] || pixels[index * 4 + 3] >= 16) return
+    outside[index] = 1
+    queueX[tail] = x
+    queueY[tail] = y
+    tail += 1
+  }
+  for (let x = 0; x < width; x += 1) {
+    pushOutside(x, 0)
+    pushOutside(x, height - 1)
+  }
+  for (let y = 0; y < height; y += 1) {
+    pushOutside(0, y)
+    pushOutside(width - 1, y)
+  }
+  while (head < tail) {
+    const x = queueX[head]
+    const y = queueY[head]
+    head += 1
+    pushOutside(x - 1, y)
+    pushOutside(x + 1, y)
+    pushOutside(x, y - 1)
+    pushOutside(x, y + 1)
+  }
+  const seen = new Uint8Array(count)
+  const members = new Int32Array(count)
+  let removed = 0
+  let opaque = 0
+  for (let index = 0; index < count; index += 1) if (pixels[index * 4 + 3] >= 16) opaque += 1
+  for (let start = 0; start < count; start += 1) {
+    if (!pale[start] || seen[start]) continue
+    let compHead = 0
+    let compTail = 0
+    seen[start] = 1
+    queueX[compTail] = start % width
+    queueY[compTail] = Math.floor(start / width)
+    compTail += 1
+    members[compHead] = start
+    let area = 1
+    let touch = outside[start] === 1
+    let minX = start % width
+    let maxX = minX
+    let minY = Math.floor(start / width)
+    let maxY = minY
+    while (compHead < compTail) {
+      const x = queueX[compHead]
+      const y = queueY[compHead]
+      compHead += 1
+      const visit = (nx: number, ny: number) => {
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) return
+        const index = ny * width + nx
+        if (outside[index]) touch = true
+        if (!pale[index] || seen[index]) return
+        seen[index] = 1
+        queueX[compTail] = nx
+        queueY[compTail] = ny
+        compTail += 1
+        members[area] = index
+        area += 1
+        if (nx < minX) minX = nx
+        if (nx > maxX) maxX = nx
+        if (ny < minY) minY = ny
+        if (ny > maxY) maxY = ny
+      }
+      visit(x - 1, y)
+      visit(x + 1, y)
+      visit(x, y - 1)
+      visit(x, y + 1)
+    }
+    const boxW = maxX - minX + 1
+    const boxH = maxY - minY + 1
+    if (touch || area < 4000 || area / (boxW * boxH) < 0.66 || Math.min(boxW, boxH) < 48 || area > opaque * 0.7) continue
+    const sampleCount = Math.min(area, 800)
+    const step = Math.max(1, Math.floor(area / sampleCount))
+    const lights: number[] = []
+    const chromas: number[] = []
+    for (let index = 0; index < area; index += step) {
+      const pixel = members[index] * 4
+      const red = pixels[pixel]
+      const green = pixels[pixel + 1]
+      const blue = pixels[pixel + 2]
+      lights.push(Math.min(red, green, blue))
+      chromas.push(Math.max(red, green, blue) - Math.min(red, green, blue))
+    }
+    lights.sort((a, b) => a - b)
+    chromas.sort((a, b) => a - b)
+    const holeLight = lights[Math.floor(lights.length / 2)]
+    const chroma = chromas[Math.floor(chromas.length / 2)]
+    if (holeLight < 240 || chroma > 16) continue
+    const around: number[] = []
+    const edgeStep = Math.max(1, Math.floor(area / 500))
+    for (let index = 0; index < area; index += edgeStep) {
+      const current = members[index]
+      const x = current % width
+      const y = Math.floor(current / width)
+      const edge =
+        x === 0 ||
+        y === 0 ||
+        x === width - 1 ||
+        y === height - 1 ||
+        !pale[current - 1] ||
+        !pale[current + 1] ||
+        !pale[current - width] ||
+        !pale[current + width]
+      if (!edge) continue
+      for (let radius = 6; radius <= 12; radius += 3) {
+        for (let turn = 0; turn < 8; turn += 1) {
+          const angle = (turn * Math.PI) / 4
+          const nx = x + Math.round(Math.cos(angle) * radius)
+          const ny = y + Math.round(Math.sin(angle) * radius)
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+          const at = ny * width + nx
+          if (pale[at] || pixels[at * 4 + 3] < 16) continue
+          const pixel = at * 4
+          around.push(Math.min(pixels[pixel], pixels[pixel + 1], pixels[pixel + 2]))
+        }
+      }
+    }
+    if (around.length < 12) continue
+    around.sort((a, b) => a - b)
+    const boundLight = around[Math.floor(around.length / 2)]
+    if (holeLight - boundLight < 18) continue
+    for (let index = 0; index < area; index += 1) {
+      pixels[members[index] * 4 + 3] = 0
+      removed += 1
+    }
+  }
+  return removed
+}
+
 export function removeNearWhiteEdges(source: HTMLCanvasElement): { canvas: HTMLCanvasElement; removedRatio: number } {
   const canvas = document.createElement('canvas')
   canvas.width = source.width
@@ -777,15 +912,17 @@ export function removeNearWhiteEdges(source: HTMLCanvasElement): { canvas: HTMLC
     push(x, y + 1)
   }
   removed += dropDistantLightIslands(pixels, width, height)
+  removed += clearEnclosedBackdrop(pixels, width, height, background)
   if (!removed) return { canvas: source, removedRatio: 0 }
   context.putImageData(image, 0, 0)
   return { canvas, removedRatio: removed / (width * height) }
 }
 
-export async function isolateProductCutout(blob: Blob): Promise<Blob> {
+export async function isolateProductCutout(blob: Blob, category?: Category): Promise<Blob> {
   const source = await blobToCanvas(blob)
   const removed = removeNearWhiteEdges(source)
-  if (removed.removedRatio <= 0 || removed.removedRatio > 0.82) return blob
+  const jewelry = category === 'jewelry' || (category != null && placedJewelry(category))
+  if (removed.removedRatio <= 0 || (!jewelry && removed.removedRatio > 0.82)) return blob
   return canvasToPng(trimAlpha(removed.canvas, 12))
 }
 
@@ -940,8 +1077,17 @@ function garmentGrid(marks: BodyMarks, category: Category): Point[][] {
   if (category === 'scarf') {
     return rectGrid(center.x - shoulderW * 0.34, marks.neck.y - 18, shoulderW * 0.68, shoulderW * 0.42)
   }
-  if (category === 'jewelry') {
-    return rectGrid(center.x - shoulderW * 0.16, marks.neck.y + 4, shoulderW * 0.32, shoulderW * 0.28)
+  if (category === 'jewelry' || category === 'necklace') {
+    return rectGrid(center.x - shoulderW * 0.34, marks.neck.y - 6, shoulderW * 0.68, shoulderW * 0.55)
+  }
+  if (category === 'earrings') {
+    const face = Math.max(36, marks.neck.y - marks.nose.y)
+    return rectGrid(marks.nose.x - face * 0.7, marks.nose.y - face * 0.05, face * 1.4, face * 0.7)
+  }
+  if (category === 'bracelet' || category === 'watch') {
+    const wear = wristWearPoint(marks)
+    const size = Math.max(36, shoulderW * 0.2)
+    return rectGrid(wear.x - size / 2, wear.y - size / 2, size, size)
   }
   if (category === 'glasses') {
     return rectGrid(marks.nose.x - shoulderW * 0.22, marks.nose.y - 18, shoulderW * 0.44, 36)
@@ -973,7 +1119,7 @@ function garmentGrid(marks: BodyMarks, category: Category): Point[][] {
 
   const kneeY = (marks.lKnee.y + marks.rKnee.y) / 2
   const topY = Math.min(marks.lShoulder.y, marks.rShoulder.y) - 22
-  const long = category === 'outer' || category === 'dress'
+  const long = category === 'dress'
   const bottomY = category === 'dress' ? kneeY + (kneeY - hipY) * 0.45 : long ? hipY + (kneeY - hipY) * 0.58 : hipY + 24
   const waistY = topY + (bottomY - topY) * 0.46
   const topHalf = shoulderW * (long ? 0.64 : 0.56)
@@ -996,13 +1142,62 @@ const DRAW_ORDER: Category[] = [
   'dress',
   'top',
   'belt',
-  'outer',
   'scarf',
+  'necklace',
+  'earrings',
   'jewelry',
+  'bracelet',
+  'watch',
   'hat',
   'glasses',
   'bag',
 ]
+
+export function raiseSecondWrist<T extends { id: string; category: Category }>(layers: T[], order: readonly string[]): T[] {
+  const wrists = layers.filter((layer) => layer.category === 'watch' || layer.category === 'bracelet')
+  if (wrists.length < 2) return layers
+  const rank = (layer: T) => {
+    const at = order.indexOf(layer.id)
+    if (at >= 0) return at
+    return 1000 + (layer.category === 'watch' ? 0 : 1)
+  }
+  const ordered = [...wrists].sort((a, b) => rank(a) - rank(b))
+  const first = ordered[0]
+  const second = ordered[ordered.length - 1]
+  const rest = layers.filter((layer) => layer.id !== second.id)
+  const at = rest.findIndex((layer) => layer.id === first.id)
+  if (at < 0) return layers
+  rest.splice(at + 1, 0, second)
+  return rest
+}
+
+export function secondWristShift(
+  layers: { id: string; category: Category; frame: StickerFrame }[],
+  order: readonly string[],
+  scaleOf: (id: string) => number,
+  marks: BodyMarks,
+  width: number,
+  height: number,
+): { id: string; dx: number; dy: number } | null {
+  const wrists = layers.filter((layer) => layer.category === 'watch' || layer.category === 'bracelet')
+  if (wrists.length < 2) return null
+  const rank = (layer: { id: string; category: Category }) => {
+    const at = order.indexOf(layer.id)
+    if (at >= 0) return at
+    return 1000 + (layer.category === 'watch' ? 0 : 1)
+  }
+  const ordered = [...wrists].sort((a, b) => rank(a) - rank(b))
+  const first = ordered[0]
+  const second = ordered[ordered.length - 1]
+  const fitted = orientMarks(fitMarksToCanvas(marks, width, height))
+  const wrist = wristWearPoint(fitted)
+  const dx = fitted.rShoulder.x - wrist.x
+  const dy = fitted.rShoulder.y - wrist.y
+  const length = Math.hypot(dx, dy) || 1
+  const shoulderW = Math.hypot(fitted.rShoulder.x - fitted.lShoulder.x, fitted.rShoulder.y - fitted.lShoulder.y)
+  const distance = shoulderW * 0.046 * ((scaleOf(first.id) + scaleOf(second.id)) / 2)
+  return { id: second.id, dx: (dx / length) * distance, dy: (dy / length) * distance }
+}
 
 function cropImage(image: HTMLCanvasElement, x: number, y: number, width: number, height: number) {
   const canvas = document.createElement('canvas')
@@ -1074,7 +1269,7 @@ function layoutWornTop(image: HTMLCanvasElement, marks: BodyMarks, category: Cat
   const lower = bandSpan(image, 0.4, 0.78)
   const flared = lower > upper * 1.16 && upper < image.width * 0.9
   const content = flared ? Math.max(upper, image.width * 0.4) : image.width
-  const long = category === 'outer' || category === 'dress'
+  const long = category === 'dress'
   const ease = long ? 1.12 : 1.16
   let scale = (measure.shoulderW * ease) / content
   const widthCap = measure.shoulderW * (long ? 1.72 : 1.48)
@@ -1155,7 +1350,7 @@ function layoutMesh(image: HTMLCanvasElement, marks: BodyMarks, category: Catego
 }
 
 function layoutSticker(image: HTMLCanvasElement, marks: BodyMarks, category: Category): LaidSticker {
-  if (category === 'top' || category === 'outer' || category === 'dress') return layoutWornTop(image, marks, category)
+  if (category === 'top' || category === 'dress') return layoutWornTop(image, marks, category)
   if (category === 'pants' || category === 'skirt') return layoutWornBottom(image, marks)
   if (category === 'shoes') return layoutWornShoes(image, marks)
   return layoutMesh(image, marks, category)
@@ -1238,36 +1433,45 @@ function shadeClothes(base: HTMLCanvasElement, clothes: HTMLCanvasElement) {
   return canvas
 }
 
-const OVER_BODY: Category[] = ['hat', 'glasses', 'jewelry', 'bag']
+const OVER_BODY: Category[] = ['hat', 'glasses', 'jewelry', 'necklace', 'earrings', 'bracelet', 'watch', 'bag']
 
 function scalePoint(point: Point, sx: number, sy: number): Point {
   return { x: point.x * sx, y: point.y * sy }
 }
 
+function mapMarkPoints(marks: BodyMarks, map: (point: Point) => Point): BodyMarks {
+  const next: BodyMarks = {
+    nose: map(marks.nose),
+    neck: map(marks.neck),
+    lShoulder: map(marks.lShoulder),
+    rShoulder: map(marks.rShoulder),
+    lElbow: map(marks.lElbow),
+    rElbow: map(marks.rElbow),
+    lWrist: map(marks.lWrist),
+    rWrist: map(marks.rWrist),
+    lHip: map(marks.lHip),
+    rHip: map(marks.rHip),
+    lKnee: map(marks.lKnee),
+    rKnee: map(marks.rKnee),
+    lAnkle: map(marks.lAnkle),
+    rAnkle: map(marks.rAnkle),
+  }
+  if (marks.lEar) next.lEar = map(marks.lEar)
+  if (marks.rEar) next.rEar = map(marks.rEar)
+  if (marks.neckLeft) next.neckLeft = map(marks.neckLeft)
+  if (marks.neckRight) next.neckRight = map(marks.neckRight)
+  return next
+}
+
 function fitMarksToCanvas(marks: BodyMarks, width: number, height: number): BodyMarks {
-  const points = Object.values(marks)
+  const points = Object.values(marks).filter((point): point is Point => point != null)
   const maxX = Math.max(...points.map((point) => point.x))
   const maxY = Math.max(...points.map((point) => point.y))
   const fromFrame = maxX <= FRAME_W + 2 && maxY <= FRAME_H + 2 && (width !== FRAME_W || height !== FRAME_H)
   if (!fromFrame) return marks
   const sx = width / FRAME_W
   const sy = height / FRAME_H
-  return {
-    nose: scalePoint(marks.nose, sx, sy),
-    neck: scalePoint(marks.neck, sx, sy),
-    lShoulder: scalePoint(marks.lShoulder, sx, sy),
-    rShoulder: scalePoint(marks.rShoulder, sx, sy),
-    lElbow: scalePoint(marks.lElbow, sx, sy),
-    rElbow: scalePoint(marks.rElbow, sx, sy),
-    lWrist: scalePoint(marks.lWrist, sx, sy),
-    rWrist: scalePoint(marks.rWrist, sx, sy),
-    lHip: scalePoint(marks.lHip, sx, sy),
-    rHip: scalePoint(marks.rHip, sx, sy),
-    lKnee: scalePoint(marks.lKnee, sx, sy),
-    rKnee: scalePoint(marks.rKnee, sx, sy),
-    lAnkle: scalePoint(marks.lAnkle, sx, sy),
-    rAnkle: scalePoint(marks.rAnkle, sx, sy),
-  }
+  return mapMarkPoints(marks, (point) => scalePoint(point, sx, sy))
 }
 
 async function marksOnPhoto(base: HTMLCanvasElement, stored: BodyMarks, person: boolean): Promise<BodyMarks> {
@@ -1386,7 +1590,15 @@ function limbTone(r: number, g: number, b: number): boolean {
 }
 
 function shapeSticker(category: Category): boolean {
-  return category === 'bag' || category === 'jewelry' || category === 'glasses'
+  return (
+    category === 'bag' ||
+    category === 'jewelry' ||
+    category === 'necklace' ||
+    category === 'earrings' ||
+    category === 'bracelet' ||
+    category === 'watch' ||
+    category === 'glasses'
+  )
 }
 
 function garmentPalette(image: HTMLCanvasElement): WornRgb[] {
@@ -1852,13 +2064,16 @@ const PARSER_CLASS: Record<Category, number> = {
   dress: 4,
   skirt: 5,
   pants: 6,
-  outer: 3,
   shoes: 15,
   belt: 7,
   bag: 8,
   hat: 9,
   scarf: 10,
   glasses: 11,
+  necklace: 17,
+  earrings: 17,
+  bracelet: 17,
+  watch: 17,
   jewelry: 17,
 }
 
@@ -1933,6 +2148,91 @@ function clipToRegion(mask: Uint8Array, region: Uint8Array): Uint8Array {
   return mask
 }
 
+function keepScarfMask(
+  mask: Uint8Array,
+  labels: Uint8Array,
+  worn: Uint8ClampedArray,
+  width: number,
+  height: number,
+  palette: WornRgb[],
+): Uint8Array {
+  const candidate = mask.slice()
+  for (let index = 0; index < candidate.length; index += 1) {
+    if (!candidate[index] || labels[index] || palette.length === 0) continue
+    const pixel = index * 4
+    const rgb: WornRgb = [worn[pixel], worn[pixel + 1], worn[pixel + 2]]
+    if (nearestColor(rgb, palette) >= 52) candidate[index] = 0
+  }
+  const seen = new Uint8Array(candidate.length)
+  const kept = new Uint8Array(candidate.length)
+  for (let index = 0; index < candidate.length; index += 1) {
+    if (!candidate[index] || seen[index]) continue
+    const pixels: number[] = []
+    const stack = [index]
+    seen[index] = 1
+    let overlap = 0
+    while (stack.length > 0) {
+      const current = stack.pop() ?? 0
+      pixels.push(current)
+      if (labels[current]) overlap += 1
+      const x = current % width
+      const y = (current - x) / width
+      if (x > 0) {
+        const left = current - 1
+        if (candidate[left] && !seen[left]) {
+          seen[left] = 1
+          stack.push(left)
+        }
+      }
+      if (x + 1 < width) {
+        const right = current + 1
+        if (candidate[right] && !seen[right]) {
+          seen[right] = 1
+          stack.push(right)
+        }
+      }
+      if (y > 0) {
+        const up = current - width
+        if (candidate[up] && !seen[up]) {
+          seen[up] = 1
+          stack.push(up)
+        }
+      }
+      if (y + 1 < height) {
+        const down = current + width
+        if (candidate[down] && !seen[down]) {
+          seen[down] = 1
+          stack.push(down)
+        }
+      }
+    }
+    if (overlap < 40) continue
+    for (const pixel of pixels) kept[pixel] = 1
+  }
+  return kept
+}
+
+function canvasOutsideMask(source: HTMLCanvasElement, mask: Uint8Array, fill: Rgb): HTMLCanvasElement {
+  const canvas = document.createElement('canvas')
+  canvas.width = source.width
+  canvas.height = source.height
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) return source
+  context.drawImage(source, 0, 0)
+  const image = context.getImageData(0, 0, canvas.width, canvas.height)
+  const pixels = image.data
+  for (let index = 0; index < mask.length; index += 1) {
+    if (mask[index]) continue
+    const pixel = index * 4
+    pixels[pixel] = fill[0]
+    pixels[pixel + 1] = fill[1]
+    pixels[pixel + 2] = fill[2]
+    pixels[pixel + 3] = 255
+  }
+  context.putImageData(image, 0, 0)
+  return canvas
+}
+
 function boundsOf(mask: Uint8Array, width: number, height: number): PixelRect | null {
   let x0 = width
   let y0 = height
@@ -1972,10 +2272,12 @@ export async function extractWornGarment(
   const wornData = wornContext.getImageData(0, 0, width, height).data
   const frame: PixelRect[] = [{ x0: 0, y0: 0, x1: width - 1, y1: height - 1 }]
   const shape = shapeSticker(category)
+  const hollow = category === 'glasses'
   const minPixels = shape ? 36 : 80
   const finish = (source: Uint8Array) => {
     const box = boundsOf(source, width, height)
     const zones = box ? [box] : frame
+    if (hollow) return keepComponents(keepGarmentPixels(source, wornData, width, zones, palette), width, height, 0)
     return shape
       ? solidShape(source, width, height, zones)
       : keepComponents(closeCloth(keepGarmentPixels(source, wornData, width, zones, palette), wornData, width, height, zones, palette), width, height, 0.03)
@@ -1993,12 +2295,22 @@ export async function extractWornGarment(
   const parsed = await fetchClothLabels(worn)
   const labels = parserClassMask(parsed.labels, parsed.width, parsed.height, width, height, category)
   if (maskCount(labels) < minPixels) throw new Error('没有在上身图里标出这件单品，这次没有保存。')
-  const labelBox = boundsOf(labels, width, height)
-  const classes = labelBox ? fillHoles(labels, width, [labelBox]) : labels
-  mask = clipToRegion(mask, classes)
-  core = clipToRegion(core, classes)
+  if (category === 'scarf') {
+    mask = keepScarfMask(mask, labels, wornData, width, height, palette)
+    const isolated = canvasOutsideMask(worn, mask, [196, 196, 196])
+    const parsedAgain = await fetchClothLabels(isolated)
+    const scarfAgain = parserClassMask(parsedAgain.labels, parsedAgain.width, parsedAgain.height, width, height, category)
+    if (maskCount(scarfAgain) < minPixels) throw new Error('没有在上身图里标出这件单品，这次没有保存。')
+    mask = clipToRegion(mask, scarfAgain)
+    core = clipToRegion(core, scarfAgain)
+  } else {
+    const labelBox = boundsOf(labels, width, height)
+    const classes = labelBox && !hollow ? fillHoles(labels, width, [labelBox]) : labels
+    mask = clipToRegion(mask, classes)
+    core = clipToRegion(core, classes)
+  }
   const clipped = boundsOf(mask, width, height)
-  if (clipped) {
+  if (clipped && !hollow && category !== 'scarf') {
     mask = shape ? fillHoles(mask, width, [clipped]) : fillClothHoles(mask, wornData, width, [clipped], palette)
   }
   const covered = maskCount(mask)
@@ -2025,7 +2337,7 @@ export async function extractWornGarment(
         pixels[pixel + 3] = 0
         continue
       }
-      if (shape && !core[at]) {
+      if (shape && !hollow && !core[at]) {
         const source = nearestCore(core, width, height, x + col, y + row)
         pixels[pixel] = wornData[source]
         pixels[pixel + 1] = wornData[source + 1]
@@ -2073,7 +2385,7 @@ function solidBackdrop(canvas: HTMLCanvasElement): boolean {
 
 function placeCutout(image: HTMLCanvasElement, marks: BodyMarks, category: Category, bodyW: number, bodyH: number): LaidSticker {
   const measure = wearMeasures(marks)
-  if (category === 'top' || category === 'outer' || category === 'dress') {
+  if (category === 'top' || category === 'dress') {
     const elbow = Math.abs(marks.rElbow.x - marks.lElbow.x)
     const long = category !== 'top'
     const targetW = Math.max(measure.shoulderW * 1.45, elbow * 0.92, bodyW * (long ? 0.5 : 0.42))
@@ -2150,6 +2462,315 @@ async function fitGarmentOnBody(
   }
 }
 
+function scaleCanvas(image: HTMLCanvasElement, scale: number): HTMLCanvasElement {
+  const width = Math.max(1, Math.round(image.width * scale))
+  const height = Math.max(1, Math.round(image.height * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d')
+  if (!context) return image
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(image, 0, 0, width, height)
+  return canvas
+}
+
+function jewelrySource(source: HTMLCanvasElement): HTMLCanvasElement {
+  let image = source
+  if (solidBackdrop(image)) {
+    const removed = removeSolidBackground(image)
+    if (removed.removedRatio > 0.04 && removed.removedRatio < 0.93) image = removed.canvas
+  }
+  return trimAlpha(image, 2)
+}
+
+function columnInk(image: HTMLCanvasElement): Uint32Array | null {
+  const context = image.getContext('2d', { willReadFrequently: true })
+  if (!context) return null
+  const { width, height } = image
+  const data = context.getImageData(0, 0, width, height).data
+  const counts = new Uint32Array(width)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (data[(y * width + x) * 4 + 3] > 24) counts[x] += 1
+    }
+  }
+  return counts
+}
+
+function splitEarringPair(image: HTMLCanvasElement): [HTMLCanvasElement, HTMLCanvasElement] | null {
+  const trimmed = trimAlpha(image, 1)
+  if (trimmed.width < 16 || trimmed.height < 16) return null
+  const counts = columnInk(trimmed)
+  if (!counts) return null
+  const width = trimmed.width
+  let peak = 0
+  for (let x = 0; x < width; x += 1) if (counts[x] > peak) peak = counts[x]
+  if (peak < 8) return null
+  const valley = Math.max(4, peak * 0.12)
+  let bestStart = -1
+  let bestEnd = -1
+  let run = -1
+  const from = Math.floor(width * 0.18)
+  const to = Math.ceil(width * 0.82)
+  for (let x = from; x < to; x += 1) {
+    if (counts[x] <= valley) {
+      if (run < 0) run = x
+    } else if (run >= 0) {
+      if (x - run > bestEnd - bestStart) {
+        bestStart = run
+        bestEnd = x
+      }
+      run = -1
+    }
+  }
+  if (run >= 0 && to - run > bestEnd - bestStart) {
+    bestStart = run
+    bestEnd = to
+  }
+  if (bestStart < 0 || bestEnd - bestStart < Math.max(6, width * 0.03)) return null
+  const cut = Math.round((bestStart + bestEnd) / 2)
+  let leftInk = 0
+  let rightInk = 0
+  for (let x = 0; x < cut; x += 1) leftInk += counts[x]
+  for (let x = cut; x < width; x += 1) rightInk += counts[x]
+  if (leftInk < peak * 4 || rightInk < peak * 4) return null
+  if (leftInk < rightInk * 0.2 || rightInk < leftInk * 0.2) return null
+  const left = trimAlpha(cropImage(trimmed, 0, 0, cut, trimmed.height), 1)
+  const right = trimAlpha(cropImage(trimmed, cut, 0, width - cut, trimmed.height), 1)
+  if (left.width < 4 || right.width < 4) return null
+  return [left, right]
+}
+
+
+function pointBounds(points: Point[], pad: number): { x: number; y: number; width: number; height: number } {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const point of points) {
+    if (point.x < minX) minX = point.x
+    if (point.y < minY) minY = point.y
+    if (point.x > maxX) maxX = point.x
+    if (point.y > maxY) maxY = point.y
+  }
+  return {
+    x: Math.floor(minX - pad),
+    y: Math.floor(minY - pad),
+    width: Math.max(1, Math.ceil(maxX - minX + pad * 2)),
+    height: Math.max(1, Math.ceil(maxY - minY + pad * 2)),
+  }
+}
+
+
+function placeFlatJewelry(image: HTMLCanvasElement, x: number, y: number, scale: number): { canvas: HTMLCanvasElement; x: number; y: number } {
+  const canvas = scaleCanvas(image, scale)
+  return { canvas, x: x - canvas.width / 2, y }
+}
+
+function anchorsPlausible(marks: BodyMarks): boolean {
+  if (!marks.lEar || !marks.rEar || !marks.neckLeft || !marks.neckRight) return false
+  const shoulder = Math.hypot(marks.rShoulder.x - marks.lShoulder.x, marks.rShoulder.y - marks.lShoulder.y)
+  const neckW = Math.hypot(marks.neckRight.x - marks.neckLeft.x, marks.neckRight.y - marks.neckLeft.y)
+  return neckW > shoulder * 0.2
+}
+
+function wornAnchors(marks: BodyMarks): { lEar: Point; rEar: Point; neckLeft: Point; neckRight: Point } {
+  if (anchorsPlausible(marks) && marks.lEar && marks.rEar && marks.neckLeft && marks.neckRight) {
+    return { lEar: marks.lEar, rEar: marks.rEar, neckLeft: marks.neckLeft, neckRight: marks.neckRight }
+  }
+  return jewelryPoints(marks.nose, marks.neck, marks.lShoulder, marks.rShoulder)
+}
+
+function composeEarrings(source: HTMLCanvasElement, marks: BodyMarks): { canvas: HTMLCanvasElement; x: number; y: number } {
+  const measure = wearMeasures(marks)
+  const face = Math.max(36, marks.neck.y - marks.nose.y)
+  const anchors = wornAnchors(marks)
+  const lobes = [anchors.lEar, anchors.rEar]
+  const pair = splitEarringPair(source)
+  const pieces = pair ?? [source, source]
+  const placed = pieces.map((piece, index) => {
+    const lobe = lobes[index] ?? lobes[0]
+    const tall = piece.height > piece.width * 1.8
+    const target = tall ? Math.max(face * 1.15, measure.shoulderW * 0.36) : Math.max(10, measure.shoulderW * 0.055)
+    let scale = tall ? target / piece.height : target / piece.width
+    const maxH = Math.max(face * 1.35, measure.shoulderW * 0.42)
+    const minH = Math.max(8, face * 0.07)
+    if (piece.height * scale > maxH) scale = maxH / piece.height
+    if (piece.height * scale < minH) scale = minH / piece.height
+    const width = Math.max(1, Math.round(piece.width * scale))
+    const height = Math.max(1, Math.round(piece.height * scale))
+    const hang = piece.height > piece.width * 1.35
+    return { piece, x: lobe.x - width / 2, y: hang ? lobe.y : lobe.y - height / 2, width, height }
+  })
+  const x0 = Math.min(...placed.map((item) => item.x))
+  const y0 = Math.min(...placed.map((item) => item.y))
+  const x1 = Math.max(...placed.map((item) => item.x + item.width))
+  const y1 = Math.max(...placed.map((item) => item.y + item.height))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(x1 - x0))
+  canvas.height = Math.max(1, Math.round(y1 - y0))
+  const context = canvas.getContext('2d')
+  if (!context) return { canvas: source, x: x0, y: y0 }
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  for (const item of placed) context.drawImage(item.piece, Math.round(item.x - x0), Math.round(item.y - y0), item.width, item.height)
+  return { canvas, x: x0, y: y0 }
+}
+
+function placeNecklace(image: HTMLCanvasElement, marks: BodyMarks): { canvas: HTMLCanvasElement; x: number; y: number } {
+  const measure = wearMeasures(marks)
+  const face = Math.max(36, marks.neck.y - marks.nose.y)
+  const anchors = wornAnchors(marks)
+  const neckLeft = anchors.neckLeft.x <= anchors.neckRight.x ? anchors.neckLeft : anchors.neckRight
+  const neckRight = anchors.neckLeft.x <= anchors.neckRight.x ? anchors.neckRight : anchors.neckLeft
+  const neckW = Math.max(48, neckRight.x - neckLeft.x)
+  let scale = neckW / image.width
+  const maxH = Math.max(face * 1.35, (measure.hipY - marks.neck.y) * 0.42)
+  if (image.height * scale > maxH) scale = maxH / image.height
+  const wornW = image.width * scale
+  const wornH = image.height * scale
+  const topY = (neckLeft.y + neckRight.y) / 2
+  const topLeft = { x: marks.neck.x - wornW / 2, y: topY }
+  const topRight = { x: marks.neck.x + wornW / 2, y: topY }
+  const bow = wornW * 0.07
+  const bottomLeft = { x: topLeft.x, y: topLeft.y + wornH }
+  const bottomRight = { x: topRight.x, y: topRight.y + wornH }
+  const leftControl = { x: topLeft.x - bow, y: topLeft.y + wornH * 0.48 }
+  const rightControl = { x: topRight.x + bow, y: topRight.y + wornH * 0.48 }
+  const strips = Math.max(32, Math.min(image.height, 220))
+  const samples: Point[] = []
+  for (let index = 0; index <= strips; index += 1) {
+    const t = index / strips
+    samples.push(quadPoint(topLeft, leftControl, bottomLeft, t), quadPoint(topRight, rightControl, bottomRight, t))
+  }
+  const box = pointBounds(samples, 2)
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, box.width)
+  canvas.height = Math.max(1, box.height)
+  const context = canvas.getContext('2d')
+  if (!context) return placeFlatJewelry(image, marks.neck.x, marks.neck.y, scale)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  const slice = image.height / strips
+  for (let index = 0; index < strips; index += 1) {
+    const t0 = index / strips
+    const t1 = (index + 1) / strips
+    const from = quadPoint(topLeft, leftControl, bottomLeft, t0)
+    const to = quadPoint(topRight, rightControl, bottomRight, t0)
+    const next = quadPoint(topLeft, leftControl, bottomLeft, t1)
+    const sy = index * slice
+    context.save()
+    context.transform(
+      (to.x - from.x) / image.width,
+      (to.y - from.y) / image.width,
+      (next.x - from.x) / slice,
+      (next.y - from.y) / slice,
+      from.x - box.x,
+      from.y - box.y,
+    )
+    context.drawImage(image, 0, sy, image.width, slice + 0.75, 0, 0, image.width, slice + 0.75)
+    context.restore()
+  }
+  return { canvas, x: box.x, y: box.y }
+}
+
+function wristFront(image: HTMLCanvasElement): HTMLCanvasElement {
+  const cropW = Math.max(1, Math.round(image.width * 0.5))
+  const x = Math.floor((image.width - cropW) / 2)
+  return cropImage(image, x, 0, cropW, image.height)
+}
+
+function placeWristJewelry(image: HTMLCanvasElement, marks: BodyMarks): { canvas: HTMLCanvasElement; x: number; y: number } {
+  const front = wristFront(image)
+  const measure = wearMeasures(marks)
+  const long = front.height > front.width * 1.15
+  const target = Math.max(22, measure.shoulderW * (long ? 0.2 : 0.145))
+  const scale = target / (long ? front.height : front.width)
+  const width = Math.max(1, Math.round(front.width * scale))
+  const height = Math.max(1, Math.round(front.height * scale))
+  const wear = wristWearPoint(marks)
+  const axis = Math.atan2(marks.rShoulder.y - wear.y, marks.rShoulder.x - wear.x)
+  const rotation = long ? axis + Math.PI / 2 : 0
+  const pad = Math.ceil(Math.hypot(width, height))
+  const canvas = document.createElement('canvas')
+  canvas.width = pad
+  canvas.height = pad
+  const context = canvas.getContext('2d')
+  if (!context) return placeFlatJewelry(front, wear.x, wear.y - height / 2, scale)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.translate(pad / 2, pad / 2)
+  context.rotate(rotation)
+  context.drawImage(front, -width / 2, -height / 2, width, height)
+  const bounds = alphaBounds(canvas, 12)
+  const trimmed = trimAlpha(canvas, 1)
+  if (!bounds) return { canvas: trimmed, x: wear.x - trimmed.width / 2, y: wear.y - trimmed.height / 2 }
+  const trimX = Math.max(0, bounds.x - 1)
+  const trimY = Math.max(0, bounds.y - 1)
+  return {
+    canvas: trimmed,
+    x: wear.x - (bounds.x + bounds.w / 2 - trimX),
+    y: wear.y - (bounds.y + bounds.h / 2 - trimY),
+  }
+}
+
+async function packPlacedSticker(canvas: HTMLCanvasElement, x: number, y: number): Promise<{ stickerBlob: Blob; stickerFrame: StickerFrame }> {
+  const stickerFrame = { x: Math.round(x), y: Math.round(y), width: canvas.width, height: canvas.height }
+  const png = new Uint8Array(await (await canvasToPng(canvas)).arrayBuffer())
+  const stamped = writeStickerFrame(png, stickerFrame)
+  const packed = new ArrayBuffer(stamped.byteLength)
+  new Uint8Array(packed).set(stamped)
+  return { stickerBlob: new Blob([packed], { type: 'image/png' }), stickerFrame }
+}
+
+function hasJewelryAnchors(marks: BodyMarks): boolean {
+  return anchorsPlausible(marks)
+}
+
+async function withJewelryAnchors(base: HTMLCanvasElement, marks: BodyMarks): Promise<BodyMarks> {
+  const fitted = orientMarks(fitMarksToCanvas(marks, base.width, base.height))
+  if (hasJewelryAnchors(fitted)) return fitted
+  const photo = base.width === FRAME_W && base.height === FRAME_H ? paintStudio(base) : base
+  try {
+    const detected = await detectMarks(photo)
+    if (detected?.lEar && detected.rEar && detected.neckLeft && detected.neckRight) {
+      return orientMarks({ ...fitted, lEar: detected.lEar, rEar: detected.rEar, neckLeft: detected.neckLeft, neckRight: detected.neckRight })
+    }
+  } catch {
+    return orientMarks({ ...fitted, ...jewelryPoints(fitted.nose, fitted.neck, fitted.lShoulder, fitted.rShoulder) })
+  }
+  return orientMarks({ ...fitted, ...jewelryPoints(fitted.nose, fitted.neck, fitted.lShoulder, fitted.rShoulder) })
+}
+
+export async function completeJewelryMarks(profile: BodyProfile): Promise<BodyProfile | null> {
+  if (hasJewelryAnchors(profile.marks) && hasJewelryAnchors(profile.normalizedMarks)) return null
+  const image = await blobToCanvas(profile.imageBlob)
+  const normalized = await blobToCanvas(profile.normalizedBlob)
+  const marks = hasJewelryAnchors(profile.marks) ? profile.marks : await withJewelryAnchors(image, profile.marks)
+  const normalizedMarks = hasJewelryAnchors(profile.normalizedMarks) ? profile.normalizedMarks : await withJewelryAnchors(normalized, profile.normalizedMarks)
+  return { ...profile, marks, normalizedMarks }
+}
+
+export async function placeJewelryCutout(
+  bodyBlob: Blob,
+  cutoutBlob: Blob,
+  marks: BodyMarks,
+  category: Category,
+): Promise<{ stickerBlob: Blob; stickerFrame: StickerFrame }> {
+  const base = await blobToCanvas(bodyBlob)
+  const oriented = await withJewelryAnchors(base, marks)
+  const source = jewelrySource(await blobToCanvas(cutoutBlob))
+  const placed =
+    category === 'earrings'
+      ? composeEarrings(source, oriented)
+      : category === 'necklace'
+        ? placeNecklace(source, oriented)
+        : placeWristJewelry(source, oriented)
+  return packPlacedSticker(placed.canvas, placed.x, placed.y)
+}
+
 export async function stickerLayer(
   baseBlob: Blob,
   marks: BodyMarks,
@@ -2219,11 +2840,11 @@ export async function compositeLook(
       if (!placed) continue
       stripMagentaCanvas(item.sticker)
       const garment = trimAlpha(item.sticker, 1)
-      if (item.category === 'top' || item.category === 'outer' || item.category === 'dress') paintWornTop(placed, garment, oriented, item.category)
+      if (item.category === 'top' || item.category === 'dress') paintWornTop(placed, garment, oriented, item.category)
       else if (item.category === 'pants' || item.category === 'skirt') paintWornBottom(placed, garment, oriented)
       else if (item.category === 'shoes') paintWornShoes(placed, garment, oriented)
       else paintMesh(placed, garment, garmentGrid(oriented, item.category))
-      if (item.category === 'top' || item.category === 'outer' || item.category === 'dress' || item.category === 'scarf' || item.category === 'jewelry') {
+      if (item.category === 'top' || item.category === 'dress' || item.category === 'scarf' || item.category === 'jewelry') {
         cutHeadAndHands(placed, oriented, true)
       }
       out.drawImage(layer, 0, 0)
@@ -2236,7 +2857,7 @@ export async function compositeLook(
     const context = layer.getContext('2d')
     if (!context) continue
     const over = OVER_BODY.includes(item.category)
-    if (item.category === 'top' || item.category === 'outer' || item.category === 'dress') paintWornTop(context, item.image, oriented, item.category)
+    if (item.category === 'top' || item.category === 'dress') paintWornTop(context, item.image, oriented, item.category)
     else if (item.category === 'pants' || item.category === 'skirt') paintWornBottom(context, item.image, oriented)
     else if (item.category === 'shoes') paintWornShoes(context, item.image, oriented)
     else paintMesh(context, item.image, garmentGrid(oriented, item.category))

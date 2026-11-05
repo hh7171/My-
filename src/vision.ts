@@ -1,5 +1,45 @@
 import type { BodyMarks, Point } from './types.ts'
 
+export function jewelryPoints(
+  nose: Point,
+  neck: Point,
+  lShoulder: Point,
+  rShoulder: Point,
+  rawLeft?: Point,
+  rawRight?: Point,
+): { lEar: Point; rEar: Point; neckLeft: Point; neckRight: Point } {
+  const face = Math.max(28, neck.y - nose.y)
+  const shoulderW = Math.hypot(rShoulder.x - lShoulder.x, rShoulder.y - lShoulder.y)
+  const lobe = (ear: Point): Point => {
+    const outward = ear.x >= nose.x ? 1 : -1
+    return { x: ear.x + outward * face * 0.04, y: ear.y + face * 0.12 }
+  }
+  const spread = shoulderW * 0.5
+  const lobeY = nose.y + face * 0.18
+  let left = rawLeft ? lobe(rawLeft) : { x: nose.x - spread / 2, y: lobeY }
+  let right = rawRight ? lobe(rawRight) : { x: nose.x + spread / 2, y: lobeY }
+  if (left.x > right.x) [left, right] = [right, left]
+  const shoulderY = (lShoulder.y + rShoulder.y) / 2
+  const neckHalf = shoulderW * 0.132
+  const drop = Math.max(0, shoulderY - neck.y) * 0.17
+  const y = neck.y + drop
+  return {
+    lEar: left,
+    rEar: right,
+    neckLeft: { x: neck.x - neckHalf, y },
+    neckRight: { x: neck.x + neckHalf, y },
+  }
+}
+
+export function wristWearPoint(marks: BodyMarks): Point {
+  const shoulderW = Math.hypot(marks.rShoulder.x - marks.lShoulder.x, marks.rShoulder.y - marks.lShoulder.y)
+  const hipY = (marks.lHip.y + marks.rHip.y) / 2
+  return {
+    x: marks.rShoulder.x - shoulderW * 0.03,
+    y: hipY + shoulderW * 0.132,
+  }
+}
+
 const WASM_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm'
 const POSE_MODEL =
   'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task'
@@ -164,6 +204,29 @@ export async function detectMarks(source: HTMLCanvasElement): Promise<BodyMarks 
     x: shoulderMid.x,
     y: shoulderMid.y - (shoulderMid.y - nose.y) * 0.38,
   }
+  const ears: Point[] = []
+  for (const index of [7, 8]) {
+    const landmark = landmarks[index]
+    if (!landmark || (landmark.visibility ?? 1) < 0.15) continue
+    ears.push(pointFrom(landmark, width, height))
+  }
+  let rawLeft: Point | undefined
+  let rawRight: Point | undefined
+  if (ears.length >= 2) {
+    ears.sort((a, b) => a.x - b.x)
+    rawLeft = ears[0]
+    rawRight = ears[1]
+  } else if (ears.length === 1) {
+    const ear = ears[0]
+    const mirror = { x: nose.x * 2 - ear.x, y: ear.y }
+    if (ear.x <= nose.x) {
+      rawLeft = ear
+      rawRight = mirror
+    } else {
+      rawLeft = mirror
+      rawRight = ear
+    }
+  }
 
   return {
     nose,
@@ -180,5 +243,6 @@ export async function detectMarks(source: HTMLCanvasElement): Promise<BodyMarks 
     rKnee,
     lAnkle,
     rAnkle,
+    ...jewelryPoints(nose, neck, lShoulder, rShoulder, rawLeft, rawRight),
   }
 }

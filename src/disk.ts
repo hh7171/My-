@@ -148,8 +148,20 @@ async function reconcileBody(local: BodyProfile | null, index: LibraryIndex, sta
   })
 }
 
+function normalizeGarment(item: Garment): Garment {
+  if ((item as { category: string }).category === 'outer') return { ...item, category: 'top' }
+  return item
+}
+
 async function reconcileGarments(local: Garment[], index: LibraryIndex, stamp: DiskStamp, flags: Flags, onProgress: (text: string) => void) {
-  const localMap = new Map(local.map((item) => [item.id, item]))
+  const normalized = await Promise.all(
+    local.map(async (item) => {
+      const next = normalizeGarment(item)
+      if (next !== item) await putGarment(next)
+      return next
+    }),
+  )
+  const localMap = new Map(normalized.map((item) => [item.id, item]))
   const ids = new Set<string>([
     ...localMap.keys(),
     ...Object.keys(index.garments),
@@ -528,11 +540,12 @@ function asGarment(record: Record<string, unknown>, cutoutBlob: Blob, stickerBlo
   if (typeof record.id !== 'string' || !isLibraryId(record.id) || typeof record.name !== 'string' || typeof record.color !== 'string' || typeof record.createdAt !== 'number') {
     throw new Error('衣服读不出来')
   }
-  if (!isCategory(record.category) || (record.status !== 'owned' && record.status !== 'wishlist')) throw new Error('衣服读不出来')
+  const category = readCategory(record.category)
+  if (!category || (record.status !== 'owned' && record.status !== 'wishlist')) throw new Error('衣服读不出来')
   const garment: Garment = {
     id: record.id,
     name: record.name,
-    category: record.category,
+    category,
     status: record.status,
     color: record.color,
     cutoutBlob,
@@ -583,7 +596,18 @@ function readMarks(value: unknown): BodyMarks {
     if (typeof pair.x !== 'number' || typeof pair.y !== 'number') throw new Error('身形位置读不出来')
     marks[key] = { x: pair.x, y: pair.y }
   }
+  for (const key of ['lEar', 'rEar', 'neckLeft', 'neckRight'] as const) {
+    const point = readPoint(record[key])
+    if (point) marks[key] = point
+  }
   return marks
+}
+
+function readPoint(value: unknown): { x: number; y: number } | null {
+  if (!value || typeof value !== 'object') return null
+  const pair = value as Record<string, unknown>
+  if (typeof pair.x !== 'number' || typeof pair.y !== 'number') return null
+  return { x: pair.x, y: pair.y }
 }
 
 function readPlace(value: unknown): StickerPlace | undefined {
@@ -604,8 +628,10 @@ function readFrame(value: unknown): StickerFrame | undefined {
   return { x: record.x, y: record.y, width: record.width, height: record.height }
 }
 
-function isCategory(value: unknown): value is Category {
-  return typeof value === 'string' && (CATEGORY_ORDER as readonly string[]).includes(value)
+function readCategory(value: unknown): Category | null {
+  if (value === 'outer') return 'top'
+  if (typeof value === 'string' && (CATEGORY_ORDER as readonly string[]).includes(value)) return value as Category
+  return null
 }
 
 function isSeason(value: unknown): value is Season {

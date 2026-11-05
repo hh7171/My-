@@ -3,13 +3,16 @@ export type Category =
   | 'dress'
   | 'skirt'
   | 'pants'
-  | 'outer'
   | 'shoes'
   | 'belt'
   | 'bag'
   | 'hat'
   | 'scarf'
   | 'glasses'
+  | 'necklace'
+  | 'earrings'
+  | 'bracelet'
+  | 'watch'
   | 'jewelry'
 export type BodyType = 'straight' | 'pear' | 'hourglass' | 'apple'
 export type GarmentStatus = 'owned' | 'wishlist'
@@ -42,6 +45,10 @@ export type BodyMarks = {
   rKnee: Point
   lAnkle: Point
   rAnkle: Point
+  lEar?: Point
+  rEar?: Point
+  neckLeft?: Point
+  neckRight?: Point
 }
 
 export type Adjustments = {
@@ -105,8 +112,28 @@ export function modelGarmentBlob(item: { cutoutBlob: Blob }): Blob {
   return item.cutoutBlob
 }
 
+export function placedJewelry(category: Category): boolean {
+  return category === 'necklace' || category === 'earrings' || category === 'bracelet' || category === 'watch'
+}
+
+export function wristWearOrder(
+  items: { id: string; category: Category }[],
+  selectedOrder: readonly string[],
+): Array<'watch' | 'bracelet'> {
+  const wrists = items.filter((item) => item.category === 'watch' || item.category === 'bracelet')
+  const rank = (item: { id: string; category: Category }) => {
+    const at = selectedOrder.indexOf(item.id)
+    if (at >= 0) return at
+    return 1000 + (item.category === 'watch' ? 0 : 1)
+  }
+  return [...wrists]
+    .sort((a, b) => rank(a) - rank(b))
+    .map((item) => item.category as 'watch' | 'bracelet')
+}
+
 export function stickerVersionFor(category: Category): number {
-  void category
+  if (category === 'bracelet' || category === 'watch') return STICKER_VERSION + 14
+  if (placedJewelry(category)) return STICKER_VERSION + 12
   return STICKER_VERSION
 }
 
@@ -140,13 +167,16 @@ export const CATEGORY_ORDER: Category[] = [
   'dress',
   'skirt',
   'pants',
-  'outer',
   'shoes',
   'belt',
   'bag',
   'hat',
   'scarf',
   'glasses',
+  'necklace',
+  'earrings',
+  'bracelet',
+  'watch',
   'jewelry',
 ]
 
@@ -156,24 +186,41 @@ export function canMakeOutfit(categories: Iterable<Category>): boolean {
   return present.has('top') && (present.has('pants') || present.has('skirt'))
 }
 
+export function dressConflicts(category: Category): Category[] {
+  if (category === 'dress') return ['top', 'pants', 'skirt']
+  if (category === 'pants') return ['dress', 'skirt']
+  if (category === 'skirt') return ['dress', 'pants']
+  if (category === 'top') return ['dress']
+  return []
+}
+
+export function withoutDressConflict<T>(picked: Partial<Record<Category, T>>, category: Category): Partial<Record<Category, T>> {
+  const next = { ...picked }
+  for (const slot of dressConflicts(category)) next[slot] = undefined
+  return next
+}
+
 export const CATEGORY_LABEL: Record<Category, string> = {
   top: '上衣',
   dress: '连衣裙',
   skirt: '裙子',
   pants: '裤子',
-  outer: '外套',
   shoes: '鞋子',
   belt: '腰带',
   bag: '包',
   hat: '帽子',
   scarf: '围巾',
   glasses: '眼镜',
+  necklace: '项链',
+  earrings: '耳钉',
+  bracelet: '手链',
+  watch: '手表',
   jewelry: '珠宝',
 }
 
-export const CLOTHING_ORDER: Category[] = ['top', 'dress', 'skirt', 'pants', 'outer', 'shoes']
+export const CLOTHING_ORDER: Category[] = ['top', 'dress', 'skirt', 'pants', 'shoes']
 
-export const ACCESSORY_ORDER: Category[] = ['belt', 'bag', 'hat', 'scarf', 'glasses', 'jewelry']
+export const ACCESSORY_ORDER: Category[] = ['belt', 'bag', 'hat', 'scarf', 'glasses', 'necklace', 'earrings', 'bracelet', 'watch']
 
 export const SEASON_ORDER: Season[] = ['spring', 'summer', 'winter']
 

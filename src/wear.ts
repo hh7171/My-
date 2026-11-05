@@ -1,6 +1,6 @@
-import { extractWornGarment } from './imaging.ts'
+import { extractWornGarment, placeJewelryCutout } from './imaging.ts'
 import { maxGarments, type ImageTaskId } from './model-config.ts'
-import { CATEGORY_LABEL, type Adjustments, type BodyMarks, type Category, type StickerFrame } from './types.ts'
+import { CATEGORY_LABEL, placedJewelry, type Adjustments, type BodyMarks, type Category, type StickerFrame } from './types.ts'
 
 export type WearPiece = {
   role: Category | '参考'
@@ -23,6 +23,7 @@ type WearInput = {
   pieces: WearPiece[]
   adjust?: string
   person?: boolean
+  wristOrder?: Array<'watch' | 'bracelet'>
 }
 
 const ROLE_LINE: Record<WearPiece['role'], string> = {
@@ -30,13 +31,16 @@ const ROLE_LINE: Record<WearPiece['role'], string> = {
   dress: '要穿上的连衣裙',
   skirt: '要穿上的裙子',
   pants: '要穿上的裤子',
-  outer: '要穿上的外套',
   shoes: '要穿上的鞋子',
   belt: '要系的腰带',
   bag: '要拿的包',
   hat: '要戴的帽子',
   scarf: '要戴的围巾',
   glasses: '要戴的眼镜',
+  necklace: '要戴的项链',
+  earrings: '要戴的耳钉',
+  bracelet: '要戴的手链',
+  watch: '要戴的手表',
   jewelry: '要戴的珠宝',
   参考: '同一套衣服的参考照片，用来对齐颜色、图案和版型',
 }
@@ -92,6 +96,25 @@ export async function prepareReference(file: File): Promise<Blob> {
   return flatten(file, 1280)
 }
 
+function jewelryLines(input: WearInput): string[] {
+  const roles = new Set(input.pieces.map((piece) => piece.role))
+  const lines: string[] = []
+  if (roles.has('necklace')) lines.push('项链戴在脖子前面，只戴给出的这一条。')
+  if (roles.has('earrings')) lines.push('耳钉戴在左右两只耳朵上。商品图是一对时左右各一只，只有一只时两只耳朵戴同一只。')
+  const watch = roles.has('watch')
+  const bracelet = roles.has('bracelet')
+  if (watch && bracelet) {
+    const order = input.wristOrder
+    const first = order?.[0] === 'bracelet' ? '手链' : '手表'
+    const second = order?.[1] === 'watch' ? '手表' : order?.[1] === 'bracelet' ? '手链' : first === '手表' ? '手链' : '手表'
+    lines.push(`${first}和${second}都戴在右手腕。${second}戴在${first}上方，沿着小臂往上，两件不要叠在同一个位置。`)
+  } else if (watch) lines.push('手表戴在右手腕正面，只戴给出的这一块。')
+  else if (bracelet) lines.push('手链戴在右手腕上，只戴给出的这一条。')
+  if (roles.has('jewelry')) lines.push('这件珠宝只按商品图这一件来戴。')
+  if (lines.length > 0) lines.push('没有给出商品图的首饰不要自己加。')
+  return lines
+}
+
 function proportionLine(adjustments: Adjustments): string {
   const part = (name: string, value: number, up: string, down: string) => {
     if (value === 0) return `${name}按身高和体重的常见比例`
@@ -122,14 +145,14 @@ function promptFor(input: WearInput): string {
     `她大约 ${input.heightCm} 厘米，${input.weightKg} 公斤，${input.bodyLabel}。这些数字只用来核对，肩宽、腰、胯、腿长都保持图1。`,
     '图1现在穿着运动背心和紧身裤。用后面的商品图，把这些单品真实地穿在这个人身上。',
     clothes,
-    '上衣或连衣裙压住裤腰和裙腰，裤子和裙子压住鞋面，外套穿在上衣外面。帽子戴在头上，围巾围在脖子上。',
+    '上衣或连衣裙压住裤腰和裙腰，裤子和裙子压住鞋面。帽子戴在头上，围巾围在脖子上。',
     '不要把商品图里的模特、衣架或背景带进来，也不要换成另一套衣服。',
     '不要拼贴，不要文字，不要水印，不要多余的人。',
   ]
   if (input.pieces.some((piece) => piece.role === 'bag')) {
     lines.push('包用右手拎住提手，包身垂在身体外侧。不要斜挎，不要换到左手。')
   }
-  if (input.pieces.some((piece) => piece.role === 'jewelry')) lines.push('项链戴在脖子前面，手表或手链戴在右手腕正面。')
+  lines.push(...jewelryLines(input))
   if (input.pieces.some((piece) => piece.role === 'glasses')) lines.push('眼镜戴在眼睛上。')
   const note = input.adjust?.trim()
   if (note) {
@@ -194,7 +217,7 @@ export function wearError(error: unknown): string {
   if (text.includes('API Key') || text.includes('OPENROUTER') || text.includes('ARK_API_KEY') || text.includes('图太多')) return text
   const lower = text.toLowerCase()
   if (lower.includes('invalid') && lower.includes('key') || lower.includes('unauthorized') || lower.includes('invalidapikey') || text.includes('鉴权')) {
-    return '火山方舟 API Key 无效。请检查 .env 里的 ARK_API_KEY，改完后重新运行 npm run dev。'
+    return '火山方舟 API Key 无效。请把 Agent Plan 的专属 Key 填进 .env 的 ARK_API_KEY，改完后重新运行 npm run dev。'
   }
   if (lower.includes('quota') || lower.includes('credit') || lower.includes('allocation') || text.includes('额度') || text.includes('免费额度')) {
     return '火山方舟的免费额度用完了，这次没有生成。'
@@ -228,17 +251,20 @@ export async function generateBasePhoto(input: MeasureInput & { photoBlob: Blob;
 }
 
 const FLAT_KEEP: Record<Category, string> = {
-  top: '保留这件上衣的领、袖、下摆、颜色和图案。不要外套、裤子、裙子、鞋子。',
+  top: '保留这件上衣的领、袖、下摆、颜色和图案。外套也按这一件上衣保留。不要裤子、裙子、鞋子。',
   dress: '保留这件连衣裙从领口到裙摆的完整样子。不要另外的上衣、外套、裤子、鞋子。',
   skirt: '保留这件裙子的腰头和裙摆。被上衣挡住的腰头按这条裙子补全。不要上衣、外套、裤子、鞋子。',
   pants: '保留这条裤子的腰头、裤腿、裤长、颜色和图案。被上衣挡住的腰头按这条裤子补全。不要上衣、外套、裙子、鞋子。',
-  outer: '保留这件外套的领、袖、下摆、颜色和图案。不要里面的上衣、裤子、裙子、鞋子。',
   shoes: '只保留这一双鞋，左脚和右脚都在。不要裤脚、裙摆和其他衣服。',
   belt: '只保留这根腰带。不要上衣、裤子、裙子。',
   bag: '只保留这只包。不要身体、衣服和鞋子。',
   hat: '只保留这顶帽子。不要脸、头发和衣服。',
   scarf: '只保留这条围巾。不要衣服和身体。',
   glasses: '只保留这副眼镜。不要脸和衣服。',
+  necklace: '只保留这条项链。不要耳钉、手表、手链、衣服和身体。',
+  earrings: '只保留这对耳钉或耳环。是一对时左右都留下。不要项链、手表、手链、衣服和身体。',
+  bracelet: '只保留这条手链。不要手表、项链、耳钉、衣服和身体。不要照着原图的圈形摆。把整条手链拆开，拉成一条从左到右的细长带子，左端和右端分开，中间是实心链身。不要椭圆，不要C形，不要闭合成环，带子中间不要留白。坠饰和主要花样放在带子正中。',
+  watch: '只保留这块手表。不要手链、项链、耳钉、衣服和身体。表盘放在正中，表带向左右平直展开，不要绕成圈，不要把表带在表盘后面扣上。',
   jewelry: '只保留这一件珠宝。不要身体和衣服。',
 }
 
@@ -247,7 +273,9 @@ export function flatLayPrompt(category: Category, name: string): string {
   const lines = [
     '把图1整理成一张白底平铺商品图。',
     '图1可能是穿着拍的、单独拍的，也可能是网店上身图。你自己判断单品在人身上、衣架上还是摊在地上。画面里常常还有别的单品。',
-    `这次只要${label}。只保留这一件，正面展平。`,
+    category === 'bracelet'
+      ? `这次只要${label}。不要摊成一个圈，改成一条横向拉直的带子。`
+      : `这次只要${label}。只保留这一件，正面展平。`,
     FLAT_KEEP[category],
     '不要人，不要衣架，不要原背景，不要文字，不要水印。背景是纯白。',
   ]
@@ -265,14 +293,17 @@ const FIT_PLACE: Record<Category, string> = {
   dress: '连衣裙的肩线落在图1肩膀的位置，裙摆长度跟图2。',
   skirt: '裙腰落在图1的腰上，裙摆长度跟图2。',
   pants: '裤腰落在图1的腰上，裤腿顺着图1的腿，裤长跟图2。',
-  outer: '外套的肩线落在图1肩膀上，穿在上衣外面的位置，衣长跟图2。',
   shoes: '鞋子穿进图1的脚里，盖住原来的脚趾。图2没有靴筒时不要画成长靴。',
   belt: '腰带系在图1腰上的位置。',
   bag: '模特用右手拎住提手，左手保持原样。包身完整垂在身体外侧。不要斜挎，不要只露出一小块。',
   hat: '帽子落在图1头顶的位置。',
-  scarf: '围巾围在图1脖子的位置。',
+  scarf: '围巾围在图1脖子上，领口打一个环或结。两条长边垂在身前，盖在衣服外面，长度、宽度、花纹和流苏跟图2。',
   glasses: '眼镜戴在图1眼睛的位置。',
-  jewelry: '项链落在图1脖子前面，手表或手链落在图1右手腕正面。只出现这一件。',
+  necklace: '项链落在图1脖子前面。只出现这一条。',
+  earrings: '耳钉戴在图1的两只耳朵上。只出现这一对。',
+  bracelet: '手链落在图1右手腕上。只出现这一条。',
+  watch: '手表落在图1右手腕正面。只出现这一块。',
+  jewelry: '只把这一件珠宝戴上。不要另外加别的首饰。',
 }
 
 export function stickerPrompt(input: { name: string; category: Category }): string {
@@ -295,6 +326,18 @@ export function stickerPrompt(input: { name: string; category: Category }): stri
       `图2是「${input.name}」。模特只用右手拎住这只包的提手，右手可以握住提手。`,
       '包身按提手垂下来，完整、清楚，挂在身体外侧。不要斜挎，不要把包缩成一小块，不要把图2原样贴上去。',
       '除了右手和这只包，其余都保持图1。不要文字，不要水印，不要其他人。',
+    ].join('\n')
+  }
+  if (input.category === 'scarf') {
+    const title = input.name.includes('/') ? '这条围巾' : input.name
+    return [
+      '在图1上改图。图1是个人模特，输出必须和图1是同一张画面。',
+      '脸、五官、肤色、头发、表情、身材、站姿、手脚、原来的衣服、画面裁切和背景都保持图1。禁止重画脸，禁止重画身体，禁止换姿势，禁止换背景。',
+      `图2是「${title}」。不要把这张商品图原样贴在身上。`,
+      '把这条围巾围在图1脖子上，在领口打一个环或结。',
+      '两条长边都垂在身前，盖在原来的衣服外面，不要替换上衣。长度、宽度、花纹、流苏和边都跟图2。',
+      '不要收成脖子上的一小圈，不要把长边藏到身后或衣服里面。',
+      '除了这条围巾盖住的地方，其余都保持图1。不要文字，不要水印，不要其他人。',
     ].join('\n')
   }
   return [
@@ -334,6 +377,35 @@ async function mapWornToBody(bodyBlob: Blob, wornBlob: Blob): Promise<Blob> {
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
   if (!blob) throw new Error('图片没有准备好')
   return blob
+}
+
+const stickerJobs = new Set<string>()
+
+export function stickerJobBusy(id: string): boolean {
+  return stickerJobs.has(id)
+}
+
+export function claimStickerJob(id: string): boolean {
+  if (stickerJobs.has(id)) return false
+  stickerJobs.add(id)
+  return true
+}
+
+export function releaseStickerJob(id: string): void {
+  stickerJobs.delete(id)
+}
+
+export async function buildGarmentSticker(input: {
+  bodyBlob: Blob
+  productBlob: Blob
+  category: Category
+  name: string
+  marks: BodyMarks
+}): Promise<{ stickerBlob: Blob; stickerFrame: StickerFrame }> {
+  if (placedJewelry(input.category)) {
+    return placeJewelryCutout(input.bodyBlob, input.productBlob, input.marks, input.category)
+  }
+  return generateGarmentSticker(input)
 }
 
 export async function generateGarmentSticker(input: {
