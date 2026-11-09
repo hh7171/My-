@@ -2,6 +2,10 @@ import { useEffect, useRef, useState, type DragEvent } from 'react'
 import { AdjustNote, BlobImg } from '../components.tsx'
 import { blobToCanvas, compositeLook, dominantColor, isolateProductCutout, raiseSecondWrist, secondWristShift, stickerLayer, type StickerFrame } from '../imaging.ts'
 import { addedOrder, garmentLabel, isClothingCategory, nextGarmentName, relocatedGarmentName } from '../garment-name.ts'
+import { composeLookPoster } from '../look-board.tsx'
+import { TagPicker } from '../tag-picker.tsx'
+import { normalizeTag, uniqueTags } from '../tags.ts'
+import { keepSource, latestOpenSource, readSource, writeSource } from '../source-files.ts'
 import { maxGarments } from '../model-config.ts'
 import { useWardrobe } from '../store.tsx'
 import {
@@ -24,7 +28,7 @@ import {
   type Garment,
   type Season,
 } from '../types.ts'
-import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateWearPhoto, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
+import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateOutfitVideo, generateWearPhoto, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
 
 const stickerInflight = new Set<string>()
 const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'scarf', 'necklace', 'earrings', 'jewelry', 'bracelet', 'watch', 'hat', 'glasses', 'bag']
@@ -50,7 +54,7 @@ function slotsFor(shelf: Shelf): Category[] {
 }
 
 export function WishlistPage() {
-  const { body, garments, addGarment, updateGarment, deleteGarment, addLook, notify, setNav } = useWardrobe()
+  const { body, garments, looks, savedTags, addGarment, updateGarment, deleteGarment, addLook, updateLook, notify, setNav, rememberTag } = useWardrobe()
   const [picked, setPicked] = useState<Partial<Record<Category, string>>>({})
   const [pickOrder, setPickOrder] = useState<string[]>([])
   const [wristSaved, setWristSaved] = useState<Array<'watch' | 'bracelet'>>([])
@@ -66,11 +70,18 @@ export function WishlistPage() {
   const [preparing, setPreparing] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const [result, setResult] = useState<Blob | null>(null)
+  const [resultVideo, setResultVideo] = useState<Blob | null>(null)
+  const [heldStill, setHeldStill] = useState<Blob | null>(null)
+  const [filmStep, setFilmStep] = useState<'still' | 'video' | null>(null)
   const [sources, setSources] = useState<WearPiece[]>([])
   const [madeFrom, setMadeFrom] = useState<string[]>([])
   const [making, setMaking] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [wearProblem, setWearProblem] = useState('')
   const [note, setNote] = useState('')
+  const [lookTags, setLookTags] = useState<string[]>([])
+  const [tagEpoch, setTagEpoch] = useState(0)
+  const tagInput = useRef('')
   const [preview, setPreview] = useState<Blob | null>(null)
   const [sticking, setSticking] = useState<string | null>(null)
   const [stickerError, setStickerError] = useState<{ id: string; text: string } | null>(null)
@@ -86,6 +97,7 @@ export function WishlistPage() {
   const nudgesRef = useRef(nudges)
   const saveTimer = useRef(0)
   const cardDragged = useRef(false)
+  const draftId = useRef<string | null>(null)
   const chipDropped = useRef(false)
   const resultRef = useRef<HTMLElement>(null)
   nudgesRef.current = nudges
@@ -111,6 +123,38 @@ export function WishlistPage() {
         return item ? [item] : []
       })
     : []
+  useEffect(() => {
+    let cancel = false
+    void (async () => {
+      const draft = await latestOpenSource('tryon')
+      if (!draft || cancel) return
+      const still = await readSource(draft.id, 'generated')
+      if (!still || cancel) return
+      draftId.current = draft.id
+      setMadeFrom(draft.garmentIds)
+      const pieces = draft.garmentIds.flatMap((id) => {
+        const item = garmentsRef.current.find((garment) => garment.id === id)
+        return item ? [{ role: item.category, name: item.name, blob: item.cutoutBlob }] : []
+      })
+      setSources(pieces)
+      const video = await readSource(draft.id, 'video')
+      if (cancel) return
+      if (video) {
+        setResult(still)
+        setResultVideo(video)
+        setHeldStill(null)
+        setStage(true)
+      } else {
+        setHeldStill(still)
+        setResultVideo(null)
+        setStage(true)
+      }
+    })()
+    return () => {
+      cancel = true
+    }
+  }, [])
+
   const currentIds = worn.map((item) => item.id)
   const sameOutfit = currentIds.length === madeFrom.length && currentIds.every((id, index) => id === madeFrom[index])
   const outfitReady = canMakeOutfit(worn.map((item) => item.category))
@@ -524,6 +568,8 @@ export function WishlistPage() {
     setTryOn({ ...picked })
     setCovered({})
     setResult(null)
+    setResultVideo(null)
+    setHeldStill(null)
     setSources([])
     setMadeFrom([])
     setWearProblem('')
@@ -536,6 +582,8 @@ export function WishlistPage() {
     setStage(false)
     setCovered({})
     setResult(null)
+    setResultVideo(null)
+    setHeldStill(null)
     setSources([])
     setMadeFrom([])
     setWearProblem('')
@@ -601,7 +649,23 @@ export function WishlistPage() {
       })
       setCovered((current) => ({ ...withoutDressConflict(current, item.category), [item.category]: nextId }))
     }
-    notify('已转入衣橱')
+    const ownedIds = new Set(garments.filter((garment) => garment.status === 'owned' && garment.id !== item.id).map((garment) => garment.id))
+    ownedIds.add(nextId)
+    const finished = looks.filter(
+      (look) => look.mode === 'tryon' && look.garmentIds.length > 0 && look.garmentIds.every((id) => ownedIds.has(id)),
+    )
+    for (const look of finished) await updateLook(look.id, { mode: 'closet' })
+    if (finished.length === 0) {
+      notify('已转入衣橱')
+      return
+    }
+    const lines = finished.map((look) => {
+      const names = look.garmentIds
+        .map((id) => (id === item.id && moved ? garmentLabel(moved.name) : garmentLabel(garments.find((garment) => garment.id === id)?.name ?? '')))
+        .filter((name) => name.length > 0)
+      return names.length > 0 ? names.join('、') : '这套'
+    })
+    notify(`${lines.join('；')}已经全部拥有，试穿穿搭归入日常穿搭`)
   }
 
   async function remove(id: string, itemName: string) {
@@ -638,7 +702,12 @@ export function WishlistPage() {
     setWristSaved(wristOrder)
     setMaking(true)
     setWearProblem('')
+    setHeldStill(null)
+    setLookTags([])
+    tagInput.current = ''
+    setTagEpoch((epoch) => epoch + 1)
     setSources(pieces)
+    setFilmStep('still')
     try {
       const image = await generateWearPhoto({
         bodyBlob: body.imageBlob,
@@ -649,12 +718,55 @@ export function WishlistPage() {
         pieces,
         ...(wristOrder.length === 2 ? { wristOrder } : {}),
       })
-      setResult(image)
       setMadeFrom(currentIds)
+      const id = draftId.current ?? crypto.randomUUID()
+      draftId.current = id
+      try {
+        await writeSource(id, 'generated', image, { page: 'tryon', garmentIds: currentIds })
+      } catch (cause) {
+        setHeldStill(image)
+        setWearProblem(`${wearError(cause)} 全身照已经做好了，可以再试一次视频。`)
+        return
+      }
+      setFilmStep('video')
+      try {
+        const video = await generateOutfitVideo(image)
+        await writeSource(id, 'video', video)
+        setResult(image)
+        setResultVideo(video)
+        setHeldStill(null)
+      } catch (cause) {
+        setResultVideo(null)
+        setHeldStill(image)
+        setWearProblem(`${wearError(cause)} 全身照已经做好了，可以只再试一次视频。`)
+      }
     } catch (cause) {
       setWearProblem(wearError(cause))
     } finally {
       setMaking(false)
+      setFilmStep(null)
+    }
+  }
+
+  async function retryVideo() {
+    if (!heldStill || making) return
+    setMaking(true)
+    setWearProblem('')
+    setFilmStep('video')
+    try {
+      const id = draftId.current ?? crypto.randomUUID()
+      draftId.current = id
+      await writeSource(id, 'generated', heldStill, { page: 'tryon', garmentIds: madeFrom })
+      const video = await generateOutfitVideo(heldStill)
+      await writeSource(id, 'video', video)
+      setResult(heldStill)
+      setResultVideo(video)
+      setHeldStill(null)
+    } catch (cause) {
+      setWearProblem(`${wearError(cause)} 全身照已经做好了，可以只再试一次视频。`)
+    } finally {
+      setMaking(false)
+      setFilmStep(null)
     }
   }
 
@@ -663,6 +775,7 @@ export function WishlistPage() {
     if (!body || !result || sources.length === 0 || !instruction) return
     setMaking(true)
     setWearProblem('')
+    setFilmStep('still')
     try {
       const image = await generateWearPhoto({
         bodyBlob: body.imageBlob,
@@ -674,18 +787,50 @@ export function WishlistPage() {
         adjust: instruction,
         ...(wristSaved.length === 2 ? { wristOrder: wristSaved } : {}),
       })
-      setResult(image)
+      const id = draftId.current ?? crypto.randomUUID()
+      draftId.current = id
+      await writeSource(id, 'generated', image, { page: 'tryon', garmentIds: madeFrom })
+      setFilmStep('video')
+      try {
+        const video = await generateOutfitVideo(image)
+        await writeSource(id, 'video', video)
+        setResult(image)
+        setResultVideo(video)
+        setHeldStill(null)
+      } catch (cause) {
+        setResultVideo(null)
+        setHeldStill(image)
+        setWearProblem(`${wearError(cause)} 新的全身照已经做好了，可以只再试一次视频。`)
+      }
     } catch (cause) {
       setWearProblem(wearError(cause))
     } finally {
       setMaking(false)
+      setFilmStep(null)
     }
   }
 
   async function save() {
-    if (!result || madeFrom.length === 0) return
-    await addLook({ mode: 'tryon', garmentIds: madeFrom, imageBlob: result })
-    notify('已保存这次试穿')
+    if (!result || !resultVideo || madeFrom.length === 0 || saving) return
+    setSaving(true)
+    try {
+      const pieces = sources.map((piece) => ({ key: `${piece.role}-${piece.name}`, blob: piece.blob }))
+      const poster = pieces.length > 0 ? await composeLookPoster({ photo: result, pieces }) : result
+      const id = draftId.current ?? crypto.randomUUID()
+      const typed = normalizeTag(tagInput.current)
+      const tags = uniqueTags(typed ? [...lookTags, typed] : lookTags)
+      for (const tag of tags) await rememberTag(tag)
+      await addLook({ id, mode: 'tryon', garmentIds: madeFrom, imageBlob: poster, videoBlob: resultVideo, ...(tags.length > 0 ? { tags } : {}) })
+      setLookTags([])
+      tagInput.current = ''
+      await keepSource(id)
+      draftId.current = null
+      notify('已保存这次试穿')
+    } catch {
+      notify('这次试穿这次没存下来')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const stackedLayers = raiseSecondWrist(
@@ -885,18 +1030,16 @@ export function WishlistPage() {
       <div className="closet-work">
         <div className="stage-list">
           {stage
-            ? slots.map((slot) => {
+            ? visible.length === 0 ? (
+                <p className="rail-empty">{shelf === 'accessory' ? '还没有配饰' : '这一季还没有衣服'}</p>
+              ) : slots.map((slot) => {
                 const items = addedOrder(visible.filter((item) => item.category === slot))
+                if (items.length === 0) return null
                 return (
                   <section key={slot} className="rail">
                     <h2>{CATEGORY_LABEL[slot]}</h2>
                     <div className="rail-track">
-                      {items.length === 0 ? (
-                        <p className="rail-empty">
-                          {shelf === 'accessory' ? `还没有${CATEGORY_LABEL[slot]}` : `这一季还没有${CATEGORY_LABEL[slot]}`}
-                        </p>
-                      ) : (
-                        items.map((item) => {
+                        {items.map((item) => {
                           const on = covered[item.category] === item.id
                           return (
                             <article key={item.id} className={on ? 'card rail-card picked' : 'card rail-card'}>
@@ -912,8 +1055,7 @@ export function WishlistPage() {
                               </button>
                             </article>
                           )
-                        })
-                      )}
+                        })}
                     </div>
                   </section>
                 )
@@ -923,19 +1065,17 @@ export function WishlistPage() {
                   <p>还没有想买的衣服。</p>
                   <p className="hint">上传一件还没买的单品，选中后再试穿。</p>
                 </div>
+              ) : wishedVisible.length === 0 ? (
+                <p className="rail-empty">{shelf === 'accessory' ? '还没有配饰' : '这一季还没有衣服'}</p>
               ) : (
                 slots.map((slot) => {
                   const items = addedOrder(wishedVisible.filter((item) => item.category === slot))
+                  if (items.length === 0) return null
                   return (
                     <section key={slot} className="rail">
                       <h2>{CATEGORY_LABEL[slot]}</h2>
                       <div className="rail-track">
-                        {items.length === 0 ? (
-                          <p className="rail-empty">
-                            {shelf === 'accessory' ? `还没有${CATEGORY_LABEL[slot]}` : `这一季还没有${CATEGORY_LABEL[slot]}`}
-                          </p>
-                        ) : (
-                          items.map((item) => {
+                          {items.map((item) => {
                             const on = picked[item.category] === item.id
                             const clothing = shelf !== 'accessory' && isClothingCategory(item.category)
                             return (
@@ -989,8 +1129,7 @@ export function WishlistPage() {
                                 </div>
                               </article>
                             )
-                          })
-                        )}
+                          })}
                       </div>
                     </section>
                   )
@@ -1117,9 +1256,16 @@ export function WishlistPage() {
               <p className="hint">{stage ? mixHint : pickHint}</p>
               {stickerErrorText ? <p className="error">{stickerErrorText}</p> : null}
               {stage ? (
-                <button type="button" className="primary" disabled={!canGenerate} onClick={() => void generate()}>
-                  {making ? '正在生成全身照片…' : '搭配'}
-                </button>
+                <>
+                  <button type="button" className="primary" disabled={!canGenerate} onClick={() => void generate()}>
+                    {making ? (filmStep === 'video' ? '正在做成展示视频…' : '正在生成全身照片…') : '搭配'}
+                  </button>
+                  {heldStill ? (
+                    <button type="button" className="ghost" disabled={making} onClick={() => void retryVideo()}>
+                      再试一次视频
+                    </button>
+                  ) : null}
+                </>
               ) : (
                 <button type="button" className="primary" disabled={selected.length === 0} onClick={begin}>
                   试穿
@@ -1159,12 +1305,28 @@ export function WishlistPage() {
             </div>
             <p className="recipe">{sources.map((piece) => garmentLabel(piece.name)).join('  +  ')}</p>
             <p className="hint">
-              {sameOutfit ? '这是按个人模特的脸和身材，参考这些商品图生成的全身照。' : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
+              {sameOutfit
+                ? '这是按个人模特的脸和身材生成的全身照。保存之后，穿搭页会放一张中间是这套全身照、两侧是单品的图。'
+                : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
             </p>
             <AdjustNote value={note} busy={making} onChange={setNote} onSubmit={() => void revise()} />
             {wearProblem ? <p className="error">{wearProblem}</p> : null}
-            <button type="button" className="primary" onClick={() => void save()}>
-              保存这次试穿
+            {heldStill ? (
+              <button type="button" className="ghost" disabled={making} onClick={() => void retryVideo()}>
+                再试一次视频
+              </button>
+            ) : null}
+            <TagPicker
+              key={tagEpoch}
+              selected={lookTags}
+              history={savedTags}
+              onChange={setLookTags}
+              onInputChange={(value) => {
+                tagInput.current = value
+              }}
+            />
+            <button type="button" className="primary" disabled={saving || making || !resultVideo} onClick={() => void save()}>
+              {saving ? '正在做成穿搭页的图片…' : '保存这次试穿'}
             </button>
           </div>
         </section>

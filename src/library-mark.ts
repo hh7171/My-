@@ -4,7 +4,7 @@ export const LIBRARY_BLOBS = {
   account: ['avatar'],
   body: ['source', 'normalized', 'image'],
   garment: ['cutout', 'sticker', 'original'],
-  look: ['image'],
+  look: ['image', 'real', 'video', 'realVideo'],
 } as const
 
 export const LIBRARY_REQUIRED = {
@@ -59,6 +59,7 @@ export function imageType(bytes: Uint8Array, declared: string): string {
   const clean = declared.split(';')[0].trim().toLowerCase()
   if (clean === 'image/jpg' || clean === 'image/jpeg') return 'image/jpeg'
   if (clean === 'image/png' || clean === 'image/webp' || clean === 'image/gif') return clean
+  if (clean === 'video/mp4' || clean === 'video/quicktime') return 'video/mp4'
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
   if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png'
   if (
@@ -75,6 +76,7 @@ export function imageType(bytes: Uint8Array, declared: string): string {
     return 'image/webp'
   }
   if (bytes.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return 'image/gif'
+  if (bytes.length >= 12 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) return 'video/mp4'
   return 'application/octet-stream'
 }
 

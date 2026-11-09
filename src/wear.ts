@@ -132,6 +132,16 @@ function measureLine(input: MeasureInput): string {
   return `手填身材：大约 ${input.heightCm} 厘米，${input.weightKg} 公斤，体型是${input.bodyLabel}。${proportionLine(input.adjustments)}`
 }
 
+function hemOverShoes(input: WearInput): string[] {
+  const shoes = input.pieces.some((piece) => piece.role === 'shoes')
+  const cover = input.pieces.some((piece) => piece.role === 'pants' || piece.role === 'skirt' || piece.role === 'dress' || piece.role === 'top')
+  if (!shoes || !cover) return []
+  return [
+    '裤长、裙长和衣长都跟商品图。长裤、长裙，或下摆已经长到脚踝的上衣和连衣裙，下摆从鞋子外面垂下来，盖住靴口和会被衣长挡住的鞋面。',
+    '禁止把裤脚、裙摆或衣摆塞进靴筒或鞋口。禁止为了露出整只靴子把裤脚卷进去或把衣服改短。衣服短、停在鞋子上方时，鞋子就露在外面。',
+  ]
+}
+
 function promptFor(input: WearInput): string {
   const clothes = input.pieces
     .map(
@@ -140,12 +150,14 @@ function promptFor(input: WearInput): string {
     )
     .join('\n')
   const lines = [
-    '生成一张写实的全身照片，从头到脚都在画面里。',
-    '图1是这个人的个人模特。脸、五官、肤色、表情、身材、站姿和画面裁切都保持图1。',
+    '在图1上改图。图1是个人模特，输出必须和图1是同一张画面、同一个人。',
+    '脸、五官、脸型、眼睛、鼻子、嘴唇、肤色和表情单独锁死。禁止重画脸，禁止换成别人，禁止使用后面任何商品图里的脸。帽子可以戴上，帽子下面仍是图1的脸。',
+    '身材和站姿保持图1。只替换衣服。输出是竖向 3:4，人在画面正中，头顶和脚都留在画面里。',
     `她大约 ${input.heightCm} 厘米，${input.weightKg} 公斤，${input.bodyLabel}。这些数字只用来核对，肩宽、腰、胯、腿长都保持图1。`,
     '图1现在穿着运动背心和紧身裤。用后面的商品图，把这些单品真实地穿在这个人身上。',
     clothes,
-    '上衣或连衣裙压住裤腰和裙腰，裤子和裙子压住鞋面。帽子戴在头上，围巾围在脖子上。',
+    '上衣或连衣裙压住裤腰和裙腰。帽子戴在头上，围巾围在脖子上。',
+    ...hemOverShoes(input),
     '不要把商品图里的模特、衣架或背景带进来，也不要换成另一套衣服。',
     '不要拼贴，不要文字，不要水印，不要多余的人。',
   ]
@@ -158,9 +170,9 @@ function promptFor(input: WearInput): string {
   if (note) {
     const topAt = input.pieces.findIndex((piece) => piece.role === 'top' || piece.role === 'dress')
     const bottomAt = input.pieces.findIndex((piece) => piece.role === 'pants' || piece.role === 'skirt')
-    lines.push('这次仍然保持图1的脸、身材和站姿。')
+    lines.push('这次仍然只改穿法。图1的五官继续锁死，不要动脸，身材和站姿也保持图1。')
     lines.push(`用户指定的穿法，必须照做：${note}`)
-    if (topAt >= 0 && bottomAt >= 0 && /下摆|裤腰|塞进|外面|里面/.test(note)) {
+    if (topAt >= 0 && bottomAt >= 0 && /下摆|衣摆|裤腰|塞进裤|塞进裙/.test(note)) {
       lines.push(
         `图${topAt + 2}的衣摆要全部露在图${bottomAt + 2}的腰头外面，盖住腰头一截，能看见完整的衣摆。不要把上衣塞进裤子或裙子。`,
       )
@@ -227,6 +239,9 @@ export function wearError(error: unknown): string {
   }
   if (lower.includes('resolution must be at least') || lower.includes('image resolution')) {
     return '有一张图太小，每张至少要 240×240。请再点一次生成。'
+  }
+  if (lower.includes('real person') || lower.includes('privacyinformation') || text.includes('可能包含真人')) {
+    return '视频没有开始：这张首帧被判定为真人。再试一次会改用刚生成的原图，不再压缩。'
   }
   const visible = text.replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim()
   if (visible) return visible
@@ -418,6 +433,17 @@ export async function generateGarmentSticker(input: {
   const worn = await postWear('fitted-layer', stickerPrompt(input), [input.bodyBlob, input.productBlob])
   const aligned = await mapWornToBody(input.bodyBlob, worn)
   return extractWornGarment(input.bodyBlob, aligned, input.productBlob, input.marks, input.category)
+}
+
+export async function generateOutfitVideo(still: Blob): Promise<Blob> {
+  const image = await blobToDataUrl(still)
+  const response = await fetch('/api/wear-video', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image }),
+  })
+  if (!response.ok) throw new Error((await response.text()) || '展示视频没有做成')
+  return response.blob()
 }
 
 export async function generateWearPhoto(input: WearInput): Promise<Blob> {

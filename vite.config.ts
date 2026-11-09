@@ -4,17 +4,18 @@ import react from '@vitejs/plugin-react'
 import { defineConfig, loadEnv, type Plugin } from 'vite'
 import { parseClothRgb } from './cloth-parser.ts'
 import { createLibrary } from './library-server.ts'
-import { ARK_IMAGE, ARK_TASK_SIZE, IMAGE_PROVIDER, OPENROUTER_TASKS, imageTask, maxGarments, maxReferences } from './src/model-config.ts'
+import { ARK_IMAGE, ARK_TASK_SIZE, ARK_VIDEO, IMAGE_PROVIDER, OPENROUTER_TASKS, imageTask, maxGarments, maxReferences } from './src/model-config.ts'
 
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/images'
 const ARK_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/plan/v3/images/generations'
+const ARK_VIDEO_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/plan/v3/contents/generations/tasks'
 
 type ImageResponse = {
   error?: { message?: string; code?: number | string }
   data?: { b64_json?: string; url?: string; media_type?: string }[]
 }
 
-function readJson(req: IncomingMessage): Promise<{ task?: string; prompt?: string; images?: string[]; rgb?: string }> {
+function readJson(req: IncomingMessage): Promise<{ task?: string; prompt?: string; images?: string[]; rgb?: string; image?: string }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     req.on('data', (chunk: Buffer | string) => {
@@ -151,7 +152,7 @@ function libraryPlugin(): Plugin {
   const library = createLibrary(join(process.cwd(), 'data'))
   const handler = (req: IncomingMessage, res: ServerResponse, next: (error?: unknown) => void) => {
     const url = req.url?.split('?')[0]
-    if (url !== '/api/library' && url !== '/api/library/file') {
+    if (url !== '/api/library' && url !== '/api/library/file' && url !== '/api/source' && url !== '/api/source/file') {
       next()
       return
     }
@@ -207,9 +208,89 @@ function clothPlugin(): Plugin {
   }
 }
 
+type VideoTask = {
+  id?: string
+  status?: string
+  error?: { message?: string }
+  content?: { video_url?: string }
+}
+
+async function arkOutfitVideo(apiKey: string, image: string): Promise<Buffer> {
+  const created = await fetch(ARK_VIDEO_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: ARK_VIDEO.model,
+      content: [
+        { type: 'text', text: ARK_VIDEO.prompt },
+        { type: 'image_url', image_url: { url: image }, role: 'first_frame' },
+      ],
+      duration: ARK_VIDEO.duration,
+      ratio: 'adaptive',
+      resolution: ARK_VIDEO.resolution,
+      generate_audio: false,
+      watermark: false,
+    }),
+  })
+  const started = (await created.json()) as VideoTask
+  if (!created.ok || !started.id) throw new Error(started.error?.message || '展示视频没有开始')
+  const deadline = Date.now() + 4 * 60 * 1000
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+    const statusResponse = await fetch(`${ARK_VIDEO_ENDPOINT}/${started.id}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    })
+    const status = (await statusResponse.json()) as VideoTask
+    if (!statusResponse.ok) throw new Error(status.error?.message || '展示视频没有查到')
+    if (status.status === 'succeeded') {
+      const url = status.content?.video_url
+      if (!url) throw new Error('展示视频没有地址')
+      const file = await fetch(url)
+      if (!file.ok) throw new Error('展示视频没有下载下来')
+      return Buffer.from(await file.arrayBuffer())
+    }
+    if (status.status === 'failed' || status.status === 'cancelled' || status.status === 'expired') {
+      throw new Error(status.error?.message || '展示视频没有做成')
+    }
+  }
+  throw new Error('展示视频等太久了')
+}
+
+async function handleWearVideo(apiKey: string, req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== 'POST') {
+    sendText(res, 405, '只接受 POST')
+    return
+  }
+  if (!apiKey) {
+    sendText(res, 401, '还没有设置火山方舟 API Key。请把 Agent Plan 的专属 Key 填进项目根目录 .env 的 ARK_API_KEY，保存后重新运行 npm run dev。')
+    return
+  }
+  try {
+    const body = await readJson(req)
+    const image = typeof body.image === 'string' ? body.image : ''
+    if (!image.startsWith('data:image/')) {
+      sendText(res, 400, '缺少全身照')
+      return
+    }
+    const bytes = await arkOutfitVideo(apiKey, image)
+    res.statusCode = 200
+    res.setHeader('Content-Type', 'video/mp4')
+    res.end(bytes)
+  } catch (error) {
+    sendText(res, 502, error instanceof Error ? error.message : '展示视频没有做成')
+  }
+}
+
 function wanPlugin(apiKey: string): Plugin {
   const handler = (req: IncomingMessage, res: ServerResponse, next: (error?: unknown) => void) => {
     const url = req.url?.split('?')[0]
+    if (url === '/api/wear-video') {
+      void handleWearVideo(apiKey, req, res)
+      return
+    }
     if (url !== '/api/wear') {
       next()
       return

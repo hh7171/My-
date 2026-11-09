@@ -1,5 +1,6 @@
 import { loadAccount, loadBody, loadDiskStamp, loadGarments, loadLooks, removeGarment, removeLook, saveAccount, saveBody, saveDiskStamp, deleteBody, putGarment, putLook, type DiskStamp } from './db.ts'
 import { imageType, isLibraryId, LIBRARY_BLOBS, LIBRARY_REQUIRED, markOf, type LibraryIndex, type LibraryKind, type LibraryWriteResult, type StoredRecord } from './library-mark.ts'
+import { uniqueTags } from './tags.ts'
 import type { Account, Adjustments, BodyMarks, BodyProfile, BodyType, Category, Garment, Look, Season, StickerFrame, StickerPlace } from './types.ts'
 import { CATEGORY_ORDER } from './types.ts'
 
@@ -215,7 +216,7 @@ async function reconcileLooks(local: Look[], index: LibraryIndex, stamp: DiskSta
       discard: () => removeLook(id),
       materialize: async (stored) => {
         const blobs = await loadBlobs('look', id, stored)
-        return asLook(stored.record, requiredBlob(blobs, 'image'))
+        return asLook(stored.record, requiredBlob(blobs, 'image'), blobs.real, blobs.video, blobs.realVideo)
       },
     })
     if (item) next.push(item)
@@ -510,7 +511,10 @@ function asAccount(record: Record<string, unknown>, avatarBlob: Blob): Account {
   if (typeof record.id !== 'string' || !isLibraryId(record.id) || typeof record.name !== 'string' || typeof record.phone !== 'string' || typeof record.createdAt !== 'number') {
     throw new Error('用户资料读不出来')
   }
-  return { id: record.id, name: record.name, phone: record.phone, createdAt: record.createdAt, avatarBlob }
+  const account: Account = { id: record.id, name: record.name, phone: record.phone, createdAt: record.createdAt, avatarBlob }
+  const savedTags = readTags(record.savedTags, 80)
+  if (savedTags.length > 0) account.savedTags = savedTags
+  return account
 }
 
 function asBody(record: Record<string, unknown>, sourceBlob: Blob, normalizedBlob: Blob, imageBlob: Blob): BodyProfile {
@@ -567,13 +571,24 @@ function asGarment(record: Record<string, unknown>, cutoutBlob: Blob, stickerBlo
   return garment
 }
 
-function asLook(record: Record<string, unknown>, imageBlob: Blob): Look {
+function asLook(record: Record<string, unknown>, imageBlob: Blob, realBlob?: Blob, videoBlob?: Blob, realVideoBlob?: Blob): Look {
   if (typeof record.id !== 'string' || !isLibraryId(record.id) || typeof record.createdAt !== 'number') throw new Error('穿搭读不出来')
   if (record.mode !== 'closet' && record.mode !== 'tryon') throw new Error('穿搭读不出来')
   if (!Array.isArray(record.garmentIds) || record.garmentIds.some((item) => typeof item !== 'string')) throw new Error('穿搭读不出来')
   const look: Look = { id: record.id, mode: record.mode, garmentIds: record.garmentIds, imageBlob, createdAt: record.createdAt }
   if (typeof record.userId === 'string') look.userId = record.userId
+  if (videoBlob) look.videoBlob = videoBlob
+  if (realBlob) look.realBlob = realBlob
+  if (realVideoBlob) look.realVideoBlob = realVideoBlob
+  if (record.showReal === true && realBlob) look.showReal = true
+  const tags = readTags(record.tags)
+  if (tags.length > 0) look.tags = tags
   return look
+}
+
+function readTags(value: unknown, limit?: number): string[] {
+  if (!Array.isArray(value)) return []
+  return uniqueTags(value.filter((item) => typeof item === 'string'), limit)
 }
 
 function readAdjustments(value: unknown): Adjustments {

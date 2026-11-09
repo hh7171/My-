@@ -1,12 +1,13 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { deleteBody, putGarment, putLook, removeGarment, removeLook, saveAccount as persistAccount, saveBody as persistBody } from './db.ts'
+import { deleteBody, loadSavedTags, putGarment, putLook, removeGarment, removeLook, saveAccount as persistAccount, saveBody as persistBody, saveSavedTags } from './db.ts'
 import { forgetBody, forgetGarment, forgetLook, openLibrary, rememberAccount, rememberBody, rememberGarment, rememberLook } from './disk.ts'
 import { isGarmentDir } from './garment-name.ts'
+import { uniqueTags } from './tags.ts'
 import { completeJewelryMarks } from './imaging.ts'
 import type { Account, BodyProfile, Garment, Look, View } from './types.ts'
 
 type NewGarment = Omit<Garment, 'id' | 'createdAt'>
-type NewLook = Omit<Look, 'id' | 'createdAt'>
+type NewLook = Omit<Look, 'id' | 'createdAt'> & { id?: string }
 
 type WardrobeValue = {
   ready: boolean
@@ -15,6 +16,7 @@ type WardrobeValue = {
   body: BodyProfile | null
   garments: Garment[]
   looks: Look[]
+  savedTags: string[]
   nav: View
   setNav: (view: View) => void
   toast: string | null
@@ -26,7 +28,10 @@ type WardrobeValue = {
   updateGarment: (id: string, patch: Partial<Garment>) => Promise<Garment | null>
   deleteGarment: (id: string) => Promise<void>
   addLook: (look: NewLook) => Promise<void>
+  updateLook: (id: string, patch: Partial<Look>) => Promise<Look | null>
   deleteLook: (id: string) => Promise<void>
+  rememberTag: (tag: string) => Promise<string>
+  forgetTag: (tag: string) => Promise<void>
 }
 
 const WardrobeContext = createContext<WardrobeValue | null>(null)
@@ -38,15 +43,18 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
   const [body, setBody] = useState<BodyProfile | null>(null)
   const [garments, setGarments] = useState<Garment[]>([])
   const [looks, setLooks] = useState<Look[]>([])
+  const [savedTags, setSavedTags] = useState<string[]>([])
   const [nav, setNav] = useState<View>('home')
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef(0)
   const garmentsRef = useRef(garments)
   const looksRef = useRef(looks)
   const accountRef = useRef(account)
+  const savedTagsRef = useRef(savedTags)
   garmentsRef.current = garments
   looksRef.current = looks
   accountRef.current = account
+  savedTagsRef.current = savedTags
 
   useEffect(() => {
     let cancelled = false
@@ -69,7 +77,19 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
         }
       }
       if (cancelled) return
-      setAccount(snapshot.account)
+      const storedTags = uniqueTags(await loadSavedTags(), 80)
+      const accountTags = snapshot.account?.savedTags ?? []
+      const lookTags = snapshot.looks.flatMap((look) => look.tags ?? [])
+      const mergedTags = uniqueTags([...accountTags, ...storedTags, ...lookTags], 80)
+      let nextAccount = snapshot.account
+      if (nextAccount && mergedTags.join('\0') !== accountTags.join('\0')) {
+        nextAccount = { ...nextAccount, savedTags: mergedTags }
+        await persistAccount(nextAccount)
+        await rememberAccount(nextAccount)
+      }
+      if (mergedTags.join('\0') !== storedTags.join('\0')) await saveSavedTags(mergedTags)
+      setAccount(nextAccount)
+      setSavedTags(mergedTags)
       setBody(bodyProfile)
       setGarments(snapshot.garments)
       setLooks(snapshot.looks)
@@ -92,6 +112,20 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
     toastTimer.current = window.setTimeout(() => setToast(null), 2600)
   }
 
+  async function writeSavedTags(nextTags: string[]) {
+    const tags = uniqueTags(nextTags, 80)
+    savedTagsRef.current = tags
+    setSavedTags(tags)
+    await saveSavedTags(tags)
+    const current = accountRef.current
+    if (!current) return
+    const next = { ...current, savedTags: tags }
+    accountRef.current = next
+    setAccount(next)
+    await persistAccount(next)
+    await rememberAccount(next)
+  }
+
   const value = useMemo<WardrobeValue>(
     () => ({
       ready,
@@ -100,14 +134,15 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
       body,
       garments,
       looks,
+      savedTags,
       nav,
       setNav,
       toast,
       notify,
       saveAccount: async (input) => {
         const next: Account = account
-          ? { ...account, name: input.name, phone: input.phone, avatarBlob: input.avatarBlob }
-          : { id: crypto.randomUUID(), name: input.name, phone: input.phone, avatarBlob: input.avatarBlob, createdAt: Date.now() }
+          ? { ...account, name: input.name, phone: input.phone, avatarBlob: input.avatarBlob, savedTags: savedTagsRef.current }
+          : { id: crypto.randomUUID(), name: input.name, phone: input.phone, avatarBlob: input.avatarBlob, savedTags: savedTagsRef.current, createdAt: Date.now() }
         await persistAccount(next)
         await rememberAccount(next)
         const ownedGarments = garmentsRef.current.filter((item) => item.userId !== next.id)
@@ -212,18 +247,65 @@ export function WardrobeProvider({ children }: { children: ReactNode }) {
         setGarments(list)
       },
       addLook: async (look) => {
-        const next: Look = { ...look, id: crypto.randomUUID(), userId: account?.id, createdAt: Date.now() }
+        const next: Look = { ...look, id: look.id ?? crypto.randomUUID(), userId: account?.id, createdAt: Date.now() }
+        if (next.tags) {
+          const tags = uniqueTags(next.tags)
+          if (tags.length > 0) next.tags = tags
+          else delete next.tags
+        }
         await putLook(next)
         await rememberLook(next)
-        setLooks((current) => [next, ...current])
+        const list = [next, ...looksRef.current.filter((item) => item.id !== next.id)]
+        looksRef.current = list
+        setLooks(list)
+      },
+      updateLook: async (id, patch) => {
+        const current = looksRef.current.find((item) => item.id === id)
+        if (!current) return null
+        const next: Look = { ...current, ...patch }
+        if ('videoBlob' in patch && !patch.videoBlob) delete next.videoBlob
+        if ('realBlob' in patch && !patch.realBlob) delete next.realBlob
+        if ('realVideoBlob' in patch && !patch.realVideoBlob) delete next.realVideoBlob
+        if ('tags' in patch) {
+          const tags = uniqueTags(patch.tags ?? [])
+          if (tags.length > 0) next.tags = tags
+          else delete next.tags
+        }
+        await putLook(next)
+        await rememberLook(next)
+        const list = looksRef.current.map((item) => (item.id === id ? next : item))
+        looksRef.current = list
+        setLooks(list)
+        return next
       },
       deleteLook: async (id) => {
         await removeLook(id)
         await forgetLook(id)
         setLooks((list) => list.filter((item) => item.id !== id))
       },
+      rememberTag: async (tag) => {
+        const clean = uniqueTags([tag])[0] ?? ''
+        if (!clean) return ''
+        if (!savedTagsRef.current.includes(clean)) await writeSavedTags([...savedTagsRef.current, clean])
+        return clean
+      },
+      forgetTag: async (tag) => {
+        const nextTags = savedTagsRef.current.filter((item) => item !== tag)
+        await writeSavedTags(nextTags)
+        for (const look of looksRef.current) {
+          if (!look.tags?.includes(tag)) continue
+          const tags = look.tags.filter((item) => item !== tag)
+          const next: Look = { ...look }
+          if (tags.length > 0) next.tags = tags
+          else delete next.tags
+          await putLook(next)
+          await rememberLook(next)
+          looksRef.current = looksRef.current.map((item) => (item.id === look.id ? next : item))
+          setLooks(looksRef.current)
+        }
+      },
     }),
-    [ready, bootText, account, body, garments, looks, nav, toast],
+    [ready, bootText, account, body, garments, looks, savedTags, nav, toast],
   )
 
   return <WardrobeContext.Provider value={value}>{children}</WardrobeContext.Provider>

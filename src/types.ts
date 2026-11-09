@@ -25,6 +25,7 @@ export type Account = {
   name: string
   phone: string
   avatarBlob: Blob
+  savedTags?: string[]
   createdAt: number
 }
 
@@ -159,6 +160,11 @@ export type Look = {
   mode: LookMode
   garmentIds: string[]
   imageBlob: Blob
+  videoBlob?: Blob
+  realBlob?: Blob
+  realVideoBlob?: Blob
+  showReal?: boolean
+  tags?: string[]
   createdAt: number
 }
 

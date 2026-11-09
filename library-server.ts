@@ -26,7 +26,7 @@ import {
 } from './src/library-mark.ts'
 
 const LIBRARY_FILE =
-  /^files\/(account|body)\/[A-Za-z0-9_-]+\.(?:png|jpg|webp|gif|bin)$|^files\/looks\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\.(?:png|jpg|webp|gif|bin)$|^files\/garments\/([A-Za-z0-9_-]+|(?:wishlist\/)?(?:spring|summer|winter|accessory)\/[A-Za-z]+\/[A-Za-z]+\d{2,})\/[A-Za-z0-9_-]+\.(?:png|jpg|webp|gif|bin)$/
+  /^files\/(account|body)\/[A-Za-z0-9_-]+\.(?:png|jpg|webp|gif|bin)$|^files\/looks\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\.(?:png|jpg|webp|gif|bin|mp4)$|^files\/garments\/([A-Za-z0-9_-]+|(?:wishlist\/)?(?:spring|summer|winter|accessory)\/[A-Za-z]+\/[A-Za-z]+\d{2,})\/[A-Za-z0-9_-]+\.(?:png|jpg|webp|gif|bin)$/
 
 function isLibraryFile(relative: string): boolean {
   const match = LIBRARY_FILE.exec(relative)
@@ -117,6 +117,58 @@ export function createLibrary(root: string): LibraryStore {
         const input = parseBody(await readBody(req))
         const result = input.op === 'delete' ? await removeRecord(input) : await writeRecord(input)
         sendJson(res, 200, result)
+        return
+      }
+      if (url.pathname === '/api/source' && req.method === 'GET') {
+        sendJson(res, 200, { items: await listSources(root) })
+        return
+      }
+      if (url.pathname === '/api/source/file' && req.method === 'GET') {
+        const id = url.searchParams.get('id') || ''
+        const name = url.searchParams.get('name') || ''
+        const found = await findSourceFile(root, id, name)
+        if (!found) {
+          sendText(res, 404, '找不到这个文件')
+          return
+        }
+        res.statusCode = 200
+        res.setHeader('Content-Type', found.type)
+        res.setHeader('Content-Length', found.bytes.length)
+        res.setHeader('Cache-Control', 'no-store')
+        res.end(found.bytes)
+        return
+      }
+      if (url.pathname === '/api/source' && req.method === 'POST') {
+        const body = JSON.parse((await readBody(req)).toString('utf8')) as {
+          op?: string
+          id?: string
+          name?: string
+          type?: string
+          data?: string
+          page?: string
+          garmentIds?: unknown
+        }
+        if (body.op === 'drop') {
+          await dropSourceFile(root, body.id || '', body.name || '')
+          sendJson(res, 200, { ok: true })
+          return
+        }
+        if (body.op === 'keep') {
+          await keepSource(root, body.id || '')
+          sendJson(res, 200, { ok: true })
+          return
+        }
+        if (body.op !== 'put' || !body.id || !body.name || typeof body.data !== 'string') {
+          sendText(res, 400, '原片没有写下来')
+          return
+        }
+        const bytes = Buffer.from(body.data, 'base64')
+        const type = imageType(bytes, typeof body.type === 'string' ? body.type : '')
+        await putSourceFile(root, body.id, body.name, type, bytes, {
+          page: body.page === 'tryon' ? 'tryon' : 'closet',
+          garmentIds: Array.isArray(body.garmentIds) ? body.garmentIds.filter((item): item is string => typeof item === 'string') : undefined,
+        })
+        sendJson(res, 200, { ok: true })
         return
       }
       sendText(res, 405, '不支持这个请求')
@@ -479,11 +531,142 @@ function stripBlobs(record: Record<string, unknown>): Record<string, unknown> {
   return next
 }
 
+const SOURCE_NAMES = ['generated', 'video', 'real', 'realVideo'] as const
+
+type SourceMeta = {
+  id: string
+  page: 'closet' | 'tryon'
+  garmentIds: string[]
+  kept: boolean
+  updatedAt: number
+}
+
+function sourceDir(root: string, id: string): string {
+  if (!isLibraryId(id)) throw new Error('编号不对')
+  return join(root, 'files', 'sources', id)
+}
+
+function isSourceName(name: string): name is (typeof SOURCE_NAMES)[number] {
+  return (SOURCE_NAMES as readonly string[]).includes(name)
+}
+
+async function readSourceMeta(root: string, id: string): Promise<SourceMeta> {
+  try {
+    const raw = JSON.parse(await readFile(join(sourceDir(root, id), 'meta.json'), 'utf8')) as Partial<SourceMeta>
+    return {
+      id,
+      page: raw.page === 'tryon' ? 'tryon' : 'closet',
+      garmentIds: Array.isArray(raw.garmentIds) ? raw.garmentIds.filter((item): item is string => typeof item === 'string') : [],
+      kept: raw.kept === true,
+      updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
+    }
+  } catch {
+    return { id, page: 'closet', garmentIds: [], kept: false, updatedAt: 0 }
+  }
+}
+
+async function writeSourceMeta(root: string, meta: SourceMeta) {
+  const dir = sourceDir(root, meta.id)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'meta.json'), JSON.stringify(meta))
+}
+
+async function listSources(root: string): Promise<SourceMeta[]> {
+  const dir = join(root, 'files', 'sources')
+  let names: string[]
+  try {
+    names = await readdir(dir)
+  } catch {
+    return []
+  }
+  const items: SourceMeta[] = []
+  for (const id of names) {
+    if (!isLibraryId(id)) continue
+    items.push(await readSourceMeta(root, id))
+  }
+  return items
+}
+
+async function findSourceFile(root: string, id: string, name: string): Promise<{ type: string; bytes: Buffer } | null> {
+  if (!isLibraryId(id) || !isSourceName(name)) return null
+  const dir = sourceDir(root, id)
+  let names: string[]
+  try {
+    names = await readdir(dir)
+  } catch {
+    return null
+  }
+  const filename = names.find((item) => item.startsWith(`${name}.`))
+  if (!filename) return null
+  const bytes = await readFile(join(dir, filename))
+  return { type: imageType(bytes, ''), bytes }
+}
+
+async function putSourceFile(
+  root: string,
+  id: string,
+  name: string,
+  type: string,
+  bytes: Buffer,
+  extra: { page: 'closet' | 'tryon'; garmentIds?: string[] },
+) {
+  if (!isSourceName(name)) throw new Error('没有这种原片')
+  if (bytes.length === 0) throw new Error('原片是空的')
+  const dir = sourceDir(root, id)
+  await mkdir(dir, { recursive: true })
+  const filename = `${name}${extension(type)}`
+  let existing: string[] = []
+  try {
+    existing = await readdir(dir)
+  } catch {
+    existing = []
+  }
+  for (const item of existing) {
+    if (!item.startsWith(`${name}.`) || item === filename) continue
+    await rm(join(dir, item), { force: true })
+  }
+  if (name === 'generated') await rm(join(dir, 'generated.mp4'), { force: true })
+  await writeFile(join(dir, filename), bytes)
+  const meta = await readSourceMeta(root, id)
+  const fresh = meta.updatedAt === 0
+  if (extra.garmentIds) {
+    meta.page = extra.page
+    meta.garmentIds = extra.garmentIds
+  } else if (fresh && (name === 'real' || name === 'realVideo')) {
+    meta.kept = true
+  }
+  meta.updatedAt = Date.now()
+  await writeSourceMeta(root, meta)
+}
+
+async function dropSourceFile(root: string, id: string, name: string) {
+  if (!isLibraryId(id) || !isSourceName(name)) throw new Error('编号不对')
+  const dir = sourceDir(root, id)
+  let names: string[]
+  try {
+    names = await readdir(dir)
+  } catch {
+    return
+  }
+  for (const item of names) {
+    if (item.startsWith(`${name}.`)) await rm(join(dir, item), { force: true })
+  }
+}
+
+async function keepSource(root: string, id: string) {
+  if (!isLibraryId(id)) throw new Error('编号不对')
+  const meta = await readSourceMeta(root, id)
+  meta.kept = true
+  meta.updatedAt = Date.now()
+  await writeSourceMeta(root, meta)
+}
+
 function extension(type: string): string {
   if (type === 'image/jpeg') return '.jpg'
   if (type === 'image/png') return '.png'
   if (type === 'image/webp') return '.webp'
   if (type === 'image/gif') return '.gif'
+  if (type === 'video/mp4') return '.mp4'
   return '.bin'
 }
 

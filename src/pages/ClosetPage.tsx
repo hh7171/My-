@@ -24,7 +24,10 @@ import {
 import { addedOrder, garmentLabel, isClothingCategory, nextGarmentName, relocatedGarmentName } from '../garment-name.ts'
 import { maxGarments } from '../model-config.ts'
 import { composeLookPoster } from '../look-board.tsx'
-import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateWearPhoto, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
+import { TagPicker } from '../tag-picker.tsx'
+import { normalizeTag, uniqueTags } from '../tags.ts'
+import { keepSource, latestOpenSource, readSource, writeSource } from '../source-files.ts'
+import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateOutfitVideo, generateWearPhoto, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
 
 const stickerInflight = new Set<string>()
 const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'scarf', 'necklace', 'earrings', 'jewelry', 'bracelet', 'watch', 'hat', 'glasses', 'bag']
@@ -54,7 +57,7 @@ function slotsFor(shelf: Shelf): Category[] {
 }
 
 export function ClosetPage() {
-  const { body, garments, addGarment, updateGarment, deleteGarment, addLook, notify, setNav } = useWardrobe()
+  const { body, garments, savedTags, addGarment, updateGarment, deleteGarment, addLook, notify, setNav, rememberTag } = useWardrobe()
   const [shelf, setShelf] = useState<Shelf>('summer')
   const [dragging, setDragging] = useState(false)
   const [dropSeason, setDropSeason] = useState<Season | null>(null)
@@ -67,8 +70,9 @@ export function ClosetPage() {
   const [pickOrder, setPickOrder] = useState<string[]>([])
   const [wristSaved, setWristSaved] = useState<Array<'watch' | 'bracelet'>>([])
   const [result, setResult] = useState<Blob | null>(null)
-  const [realShot, setRealShot] = useState<Blob | null>(null)
-  const [showReal, setShowReal] = useState(false)
+  const [resultVideo, setResultVideo] = useState<Blob | null>(null)
+  const [heldStill, setHeldStill] = useState<Blob | null>(null)
+  const [filmStep, setFilmStep] = useState<'still' | 'video' | null>(null)
   const [showLook, setShowLook] = useState(false)
   const [saving, setSaving] = useState(false)
   const [sources, setSources] = useState<WearPiece[]>([])
@@ -76,6 +80,9 @@ export function ClosetPage() {
   const [making, setMaking] = useState(false)
   const [wearProblem, setWearProblem] = useState('')
   const [note, setNote] = useState('')
+  const [lookTags, setLookTags] = useState<string[]>([])
+  const [tagEpoch, setTagEpoch] = useState(0)
+  const tagInput = useRef('')
   const [preview, setPreview] = useState<Blob | null>(null)
   const [sticking, setSticking] = useState<string | null>(null)
   const [stickerError, setStickerError] = useState<{ id: string; text: string } | null>(null)
@@ -91,6 +98,7 @@ export function ClosetPage() {
   const nudgesRef = useRef(nudges)
   const saveTimer = useRef(0)
   const cardDragged = useRef(false)
+  const draftId = useRef<string | null>(null)
   const chipDropped = useRef(false)
   nudgesRef.current = nudges
   bodyRef.current = body
@@ -106,6 +114,37 @@ export function ClosetPage() {
     const item = owned.find((garment) => garment.id === picked[slot] && garment.category === slot)
     return item ? [item] : []
   })
+  useEffect(() => {
+    let cancel = false
+    void (async () => {
+      const draft = await latestOpenSource('closet')
+      if (!draft || cancel) return
+      const still = await readSource(draft.id, 'generated')
+      if (!still || cancel) return
+      draftId.current = draft.id
+      setMadeFrom(draft.garmentIds)
+      const pieces = draft.garmentIds.flatMap((id) => {
+        const item = garmentsRef.current.find((garment) => garment.id === id)
+        return item ? [{ role: item.category, name: item.name, blob: item.cutoutBlob }] : []
+      })
+      setSources(pieces)
+      const video = await readSource(draft.id, 'video')
+      if (cancel) return
+      if (video) {
+        setResult(still)
+        setResultVideo(video)
+        setHeldStill(null)
+        setShowLook(true)
+      } else {
+        setHeldStill(still)
+        setResultVideo(null)
+      }
+    })()
+    return () => {
+      cancel = true
+    }
+  }, [])
+
   const currentIds = chosen.map((item) => item.id)
   const sameOutfit = currentIds.length === madeFrom.length && currentIds.every((id, index) => id === madeFrom[index])
   const outfitReady = canMakeOutfit(chosen.map((item) => item.category))
@@ -625,7 +664,12 @@ export function ClosetPage() {
     setWristSaved(wristOrder)
     setMaking(true)
     setWearProblem('')
+    setHeldStill(null)
+    setLookTags([])
+    tagInput.current = ''
+    setTagEpoch((epoch) => epoch + 1)
     setSources(pieces)
+    setFilmStep('still')
     try {
       const image = await generateWearPhoto({
         bodyBlob: body.imageBlob,
@@ -636,15 +680,57 @@ export function ClosetPage() {
         pieces,
         ...(wristOrder.length === 2 ? { wristOrder } : {}),
       })
-      setResult(image)
       setMadeFrom(currentIds)
-      setRealShot(null)
-      setShowReal(false)
-      setShowLook(true)
+      const id = draftId.current ?? crypto.randomUUID()
+      draftId.current = id
+      try {
+        await writeSource(id, 'generated', image, { page: 'closet', garmentIds: currentIds })
+      } catch (cause) {
+        setHeldStill(image)
+        setWearProblem(`${wearError(cause)} 全身照已经做好了，可以再试一次视频。`)
+        return
+      }
+      setFilmStep('video')
+      try {
+        const video = await generateOutfitVideo(image)
+        await writeSource(id, 'video', video)
+        setResult(image)
+        setResultVideo(video)
+        setHeldStill(null)
+        setShowLook(true)
+      } catch (cause) {
+        setResultVideo(null)
+        setHeldStill(image)
+        setWearProblem(`${wearError(cause)} 全身照已经做好了，可以只再试一次视频。`)
+      }
     } catch (cause) {
       setWearProblem(wearError(cause))
     } finally {
       setMaking(false)
+      setFilmStep(null)
+    }
+  }
+
+  async function retryVideo() {
+    if (!heldStill || making) return
+    setMaking(true)
+    setWearProblem('')
+    setFilmStep('video')
+    try {
+      const id = draftId.current ?? crypto.randomUUID()
+      draftId.current = id
+      await writeSource(id, 'generated', heldStill, { page: 'closet', garmentIds: madeFrom })
+      const video = await generateOutfitVideo(heldStill)
+      await writeSource(id, 'video', video)
+      setResult(heldStill)
+      setResultVideo(video)
+      setHeldStill(null)
+      setShowLook(true)
+    } catch (cause) {
+      setWearProblem(`${wearError(cause)} 全身照已经做好了，可以只再试一次视频。`)
+    } finally {
+      setMaking(false)
+      setFilmStep(null)
     }
   }
 
@@ -653,6 +739,7 @@ export function ClosetPage() {
     if (!body || !result || sources.length === 0 || !instruction) return
     setMaking(true)
     setWearProblem('')
+    setFilmStep('still')
     try {
       const image = await generateWearPhoto({
         bodyBlob: body.imageBlob,
@@ -664,22 +751,44 @@ export function ClosetPage() {
         adjust: instruction,
         ...(wristSaved.length === 2 ? { wristOrder: wristSaved } : {}),
       })
-      setResult(image)
-      setShowLook(true)
+      const id = draftId.current ?? crypto.randomUUID()
+      draftId.current = id
+      await writeSource(id, 'generated', image, { page: 'closet', garmentIds: madeFrom })
+      setFilmStep('video')
+      try {
+        const video = await generateOutfitVideo(image)
+        await writeSource(id, 'video', video)
+        setResult(image)
+        setResultVideo(video)
+        setHeldStill(null)
+        setShowLook(true)
+      } catch (cause) {
+        setResultVideo(null)
+        setHeldStill(image)
+        setWearProblem(`${wearError(cause)} 新的全身照已经做好了，可以只再试一次视频。`)
+      }
     } catch (cause) {
       setWearProblem(wearError(cause))
     } finally {
       setMaking(false)
+      setFilmStep(null)
     }
   }
 
   async function save() {
-    const shown = showReal && realShot ? realShot : result
-    if (!shown || madeFrom.length === 0 || saving) return
+    if (!result || !resultVideo || madeFrom.length === 0 || saving) return
     setSaving(true)
     try {
-      const poster = lookPieces.length > 0 ? await composeLookPoster({ photo: shown, pieces: lookPieces }) : shown
-      await addLook({ mode: 'closet', garmentIds: madeFrom, imageBlob: poster })
+      const poster = lookPieces.length > 0 ? await composeLookPoster({ photo: result, pieces: lookPieces }) : result
+      const id = draftId.current ?? crypto.randomUUID()
+      const typed = normalizeTag(tagInput.current)
+      const tags = uniqueTags(typed ? [...lookTags, typed] : lookTags)
+      for (const tag of tags) await rememberTag(tag)
+      await addLook({ id, mode: 'closet', garmentIds: madeFrom, imageBlob: poster, videoBlob: resultVideo, ...(tags.length > 0 ? { tags } : {}) })
+      setLookTags([])
+      tagInput.current = ''
+      await keepSource(id)
+      draftId.current = null
       setShowLook(false)
       setNav('looks')
       window.scrollTo(0, 0)
@@ -689,11 +798,6 @@ export function ClosetPage() {
     } finally {
       setSaving(false)
     }
-  }
-
-  function takeReal(file: File) {
-    setRealShot(file)
-    setShowReal(true)
   }
 
   const placedStickers = body?.person ? chosen.filter((item) => stickerAligned(item, body.updatedAt)).length : 0
@@ -869,18 +973,17 @@ export function ClosetPage() {
 
       <div className="closet-work">
       <div className="stage-list">
-        {slots.map((slot) => {
+        {visible.length === 0 ? (
+          <p className="rail-empty">{shelf === 'accessory' ? '还没有配饰' : '这一季还没有衣服'}</p>
+        ) : (
+          slots.map((slot) => {
           const items = addedOrder(visible.filter((item) => item.category === slot))
+          if (items.length === 0) return null
           return (
             <section key={slot} className="rail">
               <h2>{CATEGORY_LABEL[slot]}</h2>
               <div className="rail-track">
-                {items.length === 0 ? (
-                  <p className="rail-empty">
-                    {shelf === 'accessory' ? `还没有${CATEGORY_LABEL[slot]}` : `这一季还没有${CATEGORY_LABEL[slot]}`}
-                  </p>
-                ) : (
-                  items.map((item) => {
+                  {items.map((item) => {
                     const selected = picked[item.category] === item.id
                     return (
                       <article key={item.id} className={selected ? 'card rail-card picked' : 'card rail-card'}>
@@ -930,12 +1033,12 @@ export function ClosetPage() {
                         </div>
                       </article>
                     )
-                  })
-                )}
+                  })}
               </div>
             </section>
           )
-        })}
+        })
+        )}
       </div>
 
       <aside className="doll-panel">
@@ -1037,8 +1140,13 @@ export function ClosetPage() {
             <p className="hint">{mixHint}</p>
             {stickerErrorText ? <p className="error">{stickerErrorText}</p> : null}
             <button type="button" className="primary" disabled={!canGenerate} onClick={() => void generate()}>
-              {making ? '正在生成全身照片…' : '搭配'}
+              {making ? (filmStep === 'video' ? '正在做成展示视频…' : '正在生成全身照片…') : '搭配'}
             </button>
+            {heldStill ? (
+              <button type="button" className="ghost" disabled={making} onClick={() => void retryVideo()}>
+                再试一次视频
+              </button>
+            ) : null}
             {result ? (
               <button type="button" className="ghost" onClick={() => setShowLook(true)}>
                 查看这套搭配
@@ -1065,43 +1173,34 @@ export function ClosetPage() {
               <button type="button" className="text-button look-back" onClick={() => setShowLook(false)}>
                 返回衣橱
               </button>
-              {realShot ? (
-                <div className="look-switch">
-                  <button type="button" className={showReal ? 'chip' : 'chip selected'} onClick={() => setShowReal(false)}>
-                    生成图
-                  </button>
-                  <button type="button" className={showReal ? 'chip selected' : 'chip'} onClick={() => setShowReal(true)}>
-                    实拍
-                  </button>
-                </div>
-              ) : null}
-              <label className="upload-mini">
-                <input
-                  type="file"
-                  accept="image/*"
-                  hidden
-                  onChange={(event) => {
-                    const file = event.target.files?.[0]
-                    event.target.value = ''
-                    if (file) takeReal(file)
-                  }}
-                />
-                {realShot ? '更换实拍' : '上传实拍'}
-              </label>
             </div>
             <figure className="look-photo">
-              <BlobImg blob={showReal && realShot ? realShot : result} alt="搭配效果" />
+              <BlobImg blob={result} alt="搭配效果" />
             </figure>
             <div className="look-follow">
               <p className="recipe">{sources.map((piece) => garmentLabel(piece.name)).join('  +  ')}</p>
               <p className="hint">
                 {sameOutfit
-                  ? '这是按个人模特的脸和身材生成的全身照。上传实拍后，中间可以换成自己穿着这套的照片。保存之后，穿搭页会放一张中间是这套全身照、两侧是单品的图。'
+                  ? '这是按个人模特的脸和身材生成的全身照。保存之后，穿搭页会放一张中间是这套全身照、两侧是单品的图。想换成自己的实拍，到穿搭页右击这张。'
                   : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
               </p>
               <AdjustNote value={note} busy={making} onChange={setNote} onSubmit={() => void revise()} />
               {wearProblem ? <p className="error">{wearProblem}</p> : null}
-              <button type="button" className="primary" disabled={saving || making} onClick={() => void save()}>
+              {heldStill ? (
+                <button type="button" className="ghost" disabled={making} onClick={() => void retryVideo()}>
+                  再试一次视频
+                </button>
+              ) : null}
+              <TagPicker
+                key={tagEpoch}
+                selected={lookTags}
+                history={savedTags}
+                onChange={setLookTags}
+                onInputChange={(value) => {
+                  tagInput.current = value
+                }}
+              />
+              <button type="button" className="primary" disabled={saving || making || !resultVideo} onClick={() => void save()}>
                 {saving ? '正在做成穿搭页的图片…' : '保存这套搭配'}
               </button>
             </div>

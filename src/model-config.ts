@@ -29,11 +29,18 @@ export const ARK_IMAGE = {
   watermark: false,
 }
 
+export const ARK_VIDEO = {
+  model: 'doubao-seedance-2.5',
+  duration: 5,
+  resolution: '720p',
+  prompt: '人物穿着这身衣服自然地动起来，把全身穿搭展示清楚。保持图中的脸、衣服、鞋子和背景。不要换装，不要加文字，不要说话。',
+}
+
 export const ARK_TASK_SIZE: Record<ImageTaskId, string> = {
   avatar: '1664x2496',
   flatlay: '2048x2048',
   'fitted-layer': '1664x2496',
-  outfit: '1664x2496',
+  outfit: '1728x2304',
 }
 
 export const OPENROUTER_TASKS: Record<ImageTaskId, OpenRouterTask> = {

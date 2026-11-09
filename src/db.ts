@@ -51,6 +51,20 @@ export async function loadAccount(): Promise<Account | null> {
   return (result as Account | undefined) ?? null
 }
 
+export async function loadSavedTags(): Promise<string[]> {
+  const db = await openDb()
+  const tx = db.transaction('meta', 'readonly')
+  const result = await requestToPromise(tx.objectStore('meta').get('savedTags'))
+  return Array.isArray(result) ? result.filter((item) => typeof item === 'string') : []
+}
+
+export async function saveSavedTags(tags: string[]): Promise<void> {
+  const db = await openDb()
+  const tx = db.transaction('meta', 'readwrite')
+  tx.objectStore('meta').put(tags, 'savedTags')
+  await txDone(tx)
+}
+
 export async function saveAccount(account: Account): Promise<void> {
   const db = await openDb()
   const tx = db.transaction('meta', 'readwrite')

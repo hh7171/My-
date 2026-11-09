@@ -365,6 +365,131 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
+export type PosterSlot = { width: number; height: number; x: number; y: number; w: number; h: number }
+
+export type RealPlacement = { scale: number; panX: number; panY: number; rotation: number }
+
+async function loadCanvas(blob: Blob): Promise<HTMLCanvasElement> {
+  const bitmap = await createImageBitmap(blob)
+  const canvas = document.createElement('canvas')
+  canvas.width = bitmap.width
+  canvas.height = bitmap.height
+  canvas.getContext('2d')?.drawImage(bitmap, 0, 0)
+  bitmap.close()
+  return canvas
+}
+
+function colorClose(left: Uint8ClampedArray, right: Uint8ClampedArray, offset: number, edge: number): boolean {
+  const pixel = offset * 4
+  const sample = edge * 4
+  return Math.abs(left[pixel] - right[sample]) < 18 && Math.abs(left[pixel + 1] - right[sample + 1]) < 18 && Math.abs(left[pixel + 2] - right[sample + 2]) < 18
+}
+
+function rowEdges(row: Uint8ClampedArray, width: number): { left: number; right: number } {
+  let left = 0
+  while (left < width - 1 && colorClose(row, row, left, 2)) left += 1
+  let right = width - 1
+  while (right > left && colorClose(row, row, right, width - 3)) right -= 1
+  return { left, right }
+}
+
+function steadyEdge(votes: Map<number, number>, pick: 'high' | 'low'): number {
+  const kept = [...votes.entries()].filter(([, count]) => count >= 3)
+  if (kept.length === 0) return 0
+  kept.sort((a, b) => (pick === 'high' ? b[0] - a[0] : a[0] - b[0]))
+  return kept[0][0]
+}
+
+export async function readPosterSlot(blob: Blob): Promise<PosterSlot> {
+  const canvas = await loadCanvas(blob)
+  const full = { width: canvas.width, height: canvas.height, x: 0, y: 0, w: canvas.width, h: canvas.height }
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) return full
+  const leftVotes = new Map<number, number>()
+  const rightVotes = new Map<number, number>()
+  const step = Math.max(1, Math.round(canvas.height / 80))
+  for (let y = 0; y < canvas.height; y += step) {
+    const edges = rowEdges(context.getImageData(0, y, canvas.width, 1).data, canvas.width)
+    const leftBin = Math.round(edges.left / 4) * 4
+    const rightBin = Math.round(edges.right / 4) * 4
+    leftVotes.set(leftBin, (leftVotes.get(leftBin) ?? 0) + 1)
+    rightVotes.set(rightBin, (rightVotes.get(rightBin) ?? 0) + 1)
+  }
+  const left = steadyEdge(leftVotes, 'high')
+  const right = steadyEdge(rightVotes, 'low')
+  const side = canvas.width * 0.08
+  const hasLeft = left >= side
+  const hasRight = canvas.width - 1 - right >= side
+  if (!hasLeft && !hasRight) return full
+  const x = hasLeft ? left : 0
+  const end = hasRight ? right : canvas.width - 1
+  return { width: canvas.width, height: canvas.height, x, y: 0, w: Math.max(1, end - x + 1), h: canvas.height }
+}
+
+export function minCoverScale(photoW: number, photoH: number, slotW: number, slotH: number, rotation: number): number {
+  const rad = (rotation * Math.PI) / 180
+  const cos = Math.abs(Math.cos(rad))
+  const sin = Math.abs(Math.sin(rad))
+  let need = 0.01
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      const x = (sx * slotW) / 2
+      const y = (sy * slotH) / 2
+      need = Math.max(need, Math.abs(cos * x + sin * y) / (photoW / 2), Math.abs(-sin * x + cos * y) / (photoH / 2))
+    }
+  }
+  return need
+}
+
+function placementCovers(placement: RealPlacement, photoW: number, photoH: number, slotW: number, slotH: number): boolean {
+  const rad = (placement.rotation * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      const dx = (sx * slotW) / 2 - placement.panX
+      const dy = (sy * slotH) / 2 - placement.panY
+      const localX = (cos * dx + sin * dy) / placement.scale
+      const localY = (-sin * dx + cos * dy) / placement.scale
+      if (Math.abs(localX) > photoW / 2 || Math.abs(localY) > photoH / 2) return false
+    }
+  }
+  return true
+}
+
+export function clampPlacement(placement: RealPlacement, photoW: number, photoH: number, slotW: number, slotH: number): RealPlacement {
+  const scale = Math.max(placement.scale, minCoverScale(photoW, photoH, slotW, slotH, placement.rotation))
+  const next = { ...placement, scale }
+  if (placementCovers(next, photoW, photoH, slotW, slotH)) return next
+  let low = 0
+  let high = 1
+  for (let step = 0; step < 18; step += 1) {
+    const mid = (low + high) / 2
+    const attempt = { ...next, panX: placement.panX * mid, panY: placement.panY * mid }
+    if (placementCovers(attempt, photoW, photoH, slotW, slotH)) low = mid
+    else high = mid
+  }
+  return { ...next, panX: placement.panX * low, panY: placement.panY * low }
+}
+
+export async function paintRealPoster(poster: Blob, photo: Blob, slot: PosterSlot, placement: RealPlacement): Promise<Blob> {
+  const base = await loadCanvas(poster)
+  const shot = await loadCanvas(photo)
+  const fitted = clampPlacement(placement, shot.width, shot.height, slot.w, slot.h)
+  const context = base.getContext('2d')
+  if (!context) return canvasBlob(base)
+  context.save()
+  context.beginPath()
+  context.rect(slot.x, slot.y, slot.w, slot.h)
+  context.clip()
+  context.translate(slot.x + slot.w / 2 + fitted.panX, slot.y + slot.h / 2 + fitted.panY)
+  context.rotate((fitted.rotation * Math.PI) / 180)
+  context.scale(fitted.scale, fitted.scale)
+  context.drawImage(shot, -shot.width / 2, -shot.height / 2)
+  context.restore()
+  return canvasBlob(base)
+}
+
 async function sampleColors(blob: Blob): Promise<Array<[number, number, number]>> {
   const bitmap = await createImageBitmap(blob)
   const scale = 96 / Math.max(bitmap.width, bitmap.height)
