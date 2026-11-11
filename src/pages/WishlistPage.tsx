@@ -139,16 +139,10 @@ export function WishlistPage() {
       setSources(pieces)
       const video = await readSource(draft.id, 'video')
       if (cancel) return
-      if (video) {
-        setResult(still)
-        setResultVideo(video)
-        setHeldStill(null)
-        setStage(true)
-      } else {
-        setHeldStill(still)
-        setResultVideo(null)
-        setStage(true)
-      }
+      setResult(still)
+      setResultVideo(video)
+      setHeldStill(video ? null : still)
+      setStage(true)
     })()
     return () => {
       cancel = true
@@ -724,8 +718,10 @@ export function WishlistPage() {
       try {
         await writeSource(id, 'generated', image, { page: 'tryon', garmentIds: currentIds })
       } catch (cause) {
+        setResult(image)
+        setResultVideo(null)
         setHeldStill(image)
-        setWearProblem(`${wearError(cause)} 全身照已经做好了，可以再试一次视频。`)
+        setWearProblem(`${wearError(cause)} 全身照可以先看、先保存，也可以再试一次视频。`)
         return
       }
       setFilmStep('video')
@@ -736,9 +732,10 @@ export function WishlistPage() {
         setResultVideo(video)
         setHeldStill(null)
       } catch (cause) {
+        setResult(image)
         setResultVideo(null)
         setHeldStill(image)
-        setWearProblem(`${wearError(cause)} 全身照已经做好了，可以只再试一次视频。`)
+        setWearProblem(`${wearError(cause)} 全身照可以先看、先保存，也可以再试一次视频。`)
       }
     } catch (cause) {
       setWearProblem(wearError(cause))
@@ -763,7 +760,9 @@ export function WishlistPage() {
       setResultVideo(video)
       setHeldStill(null)
     } catch (cause) {
-      setWearProblem(`${wearError(cause)} 全身照已经做好了，可以只再试一次视频。`)
+      setResult(heldStill)
+      setResultVideo(null)
+      setWearProblem(`${wearError(cause)} 全身照可以先看、先保存，也可以再试一次视频。`)
     } finally {
       setMaking(false)
       setFilmStep(null)
@@ -798,9 +797,10 @@ export function WishlistPage() {
         setResultVideo(video)
         setHeldStill(null)
       } catch (cause) {
+        setResult(image)
         setResultVideo(null)
         setHeldStill(image)
-        setWearProblem(`${wearError(cause)} 新的全身照已经做好了，可以只再试一次视频。`)
+        setWearProblem(`${wearError(cause)} 新的全身照可以先看、先保存，也可以再试一次视频。`)
       }
     } catch (cause) {
       setWearProblem(wearError(cause))
@@ -811,7 +811,7 @@ export function WishlistPage() {
   }
 
   async function save() {
-    if (!result || !resultVideo || madeFrom.length === 0 || saving) return
+    if (!result || madeFrom.length === 0 || saving) return
     setSaving(true)
     try {
       const pieces = sources.map((piece) => ({ key: `${piece.role}-${piece.name}`, blob: piece.blob }))
@@ -820,7 +820,7 @@ export function WishlistPage() {
       const typed = normalizeTag(tagInput.current)
       const tags = uniqueTags(typed ? [...lookTags, typed] : lookTags)
       for (const tag of tags) await rememberTag(tag)
-      await addLook({ id, mode: 'tryon', garmentIds: madeFrom, imageBlob: poster, videoBlob: resultVideo, ...(tags.length > 0 ? { tags } : {}) })
+      await addLook({ id, mode: 'tryon', garmentIds: madeFrom, imageBlob: poster, ...(resultVideo ? { videoBlob: resultVideo } : {}), ...(tags.length > 0 ? { tags } : {}) })
       setLookTags([])
       tagInput.current = ''
       await keepSource(id)
@@ -1310,6 +1310,7 @@ export function WishlistPage() {
                 : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
             </p>
             <AdjustNote value={note} busy={making} onChange={setNote} onSubmit={() => void revise()} />
+            {!resultVideo ? <p className="hint">这次没有展示视频。保存之后，穿搭页只放这张照片，点一下不会播放。</p> : null}
             {wearProblem ? <p className="error">{wearProblem}</p> : null}
             {heldStill ? (
               <button type="button" className="ghost" disabled={making} onClick={() => void retryVideo()}>
@@ -1325,7 +1326,7 @@ export function WishlistPage() {
                 tagInput.current = value
               }}
             />
-            <button type="button" className="primary" disabled={saving || making || !resultVideo} onClick={() => void save()}>
+            <button type="button" className="primary" disabled={saving || making || !result} onClick={() => void save()}>
               {saving ? '正在做成穿搭页的图片…' : '保存这次试穿'}
             </button>
           </div>

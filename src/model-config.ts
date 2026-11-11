@@ -23,8 +23,8 @@ const OUTFIT_GARMENT_CAP = 8
 export const IMAGE_PROVIDER: ImageProviderId = 'ark'
 
 export const ARK_IMAGE = {
-  // Agent Plan 的 Seedream 5.0 pro。参考图最多 10 张，不支持组图参数。
-  model: 'doubao-seedream-5.0-pro',
+  // 暂时用 Seedream 5.0 flash 试效果。参考图最多 10 张，不支持组图参数。
+  model: 'doubao-seedream-5.0-flash',
   maxReferences: 10,
   watermark: false,
 }

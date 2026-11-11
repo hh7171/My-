@@ -130,15 +130,10 @@ export function ClosetPage() {
       setSources(pieces)
       const video = await readSource(draft.id, 'video')
       if (cancel) return
-      if (video) {
-        setResult(still)
-        setResultVideo(video)
-        setHeldStill(null)
-        setShowLook(true)
-      } else {
-        setHeldStill(still)
-        setResultVideo(null)
-      }
+      setResult(still)
+      setResultVideo(video)
+      setHeldStill(video ? null : still)
+      setShowLook(true)
     })()
     return () => {
       cancel = true
@@ -686,8 +681,11 @@ export function ClosetPage() {
       try {
         await writeSource(id, 'generated', image, { page: 'closet', garmentIds: currentIds })
       } catch (cause) {
+        setResult(image)
+        setResultVideo(null)
         setHeldStill(image)
-        setWearProblem(`${wearError(cause)} 全身照已经做好了，可以再试一次视频。`)
+        setShowLook(true)
+        setWearProblem(`${wearError(cause)} 全身照可以先看、先保存，也可以再试一次视频。`)
         return
       }
       setFilmStep('video')
@@ -699,9 +697,11 @@ export function ClosetPage() {
         setHeldStill(null)
         setShowLook(true)
       } catch (cause) {
+        setResult(image)
         setResultVideo(null)
         setHeldStill(image)
-        setWearProblem(`${wearError(cause)} 全身照已经做好了，可以只再试一次视频。`)
+        setShowLook(true)
+        setWearProblem(`${wearError(cause)} 全身照可以先看、先保存，也可以再试一次视频。`)
       }
     } catch (cause) {
       setWearProblem(wearError(cause))
@@ -727,7 +727,10 @@ export function ClosetPage() {
       setHeldStill(null)
       setShowLook(true)
     } catch (cause) {
-      setWearProblem(`${wearError(cause)} 全身照已经做好了，可以只再试一次视频。`)
+      setResult(heldStill)
+      setResultVideo(null)
+      setShowLook(true)
+      setWearProblem(`${wearError(cause)} 全身照可以先看、先保存，也可以再试一次视频。`)
     } finally {
       setMaking(false)
       setFilmStep(null)
@@ -763,9 +766,11 @@ export function ClosetPage() {
         setHeldStill(null)
         setShowLook(true)
       } catch (cause) {
+        setResult(image)
         setResultVideo(null)
         setHeldStill(image)
-        setWearProblem(`${wearError(cause)} 新的全身照已经做好了，可以只再试一次视频。`)
+        setShowLook(true)
+        setWearProblem(`${wearError(cause)} 新的全身照可以先看、先保存，也可以再试一次视频。`)
       }
     } catch (cause) {
       setWearProblem(wearError(cause))
@@ -776,7 +781,7 @@ export function ClosetPage() {
   }
 
   async function save() {
-    if (!result || !resultVideo || madeFrom.length === 0 || saving) return
+    if (!result || madeFrom.length === 0 || saving) return
     setSaving(true)
     try {
       const poster = lookPieces.length > 0 ? await composeLookPoster({ photo: result, pieces: lookPieces }) : result
@@ -784,7 +789,7 @@ export function ClosetPage() {
       const typed = normalizeTag(tagInput.current)
       const tags = uniqueTags(typed ? [...lookTags, typed] : lookTags)
       for (const tag of tags) await rememberTag(tag)
-      await addLook({ id, mode: 'closet', garmentIds: madeFrom, imageBlob: poster, videoBlob: resultVideo, ...(tags.length > 0 ? { tags } : {}) })
+      await addLook({ id, mode: 'closet', garmentIds: madeFrom, imageBlob: poster, ...(resultVideo ? { videoBlob: resultVideo } : {}), ...(tags.length > 0 ? { tags } : {}) })
       setLookTags([])
       tagInput.current = ''
       await keepSource(id)
@@ -1185,6 +1190,7 @@ export function ClosetPage() {
                   : '这张还是上一套的效果。单品已经改了，再点搭配才会换成新的。'}
               </p>
               <AdjustNote value={note} busy={making} onChange={setNote} onSubmit={() => void revise()} />
+              {!resultVideo ? <p className="hint">这次没有展示视频。保存之后，穿搭页只放这张照片，点一下不会播放。</p> : null}
               {wearProblem ? <p className="error">{wearProblem}</p> : null}
               {heldStill ? (
                 <button type="button" className="ghost" disabled={making} onClick={() => void retryVideo()}>
@@ -1200,7 +1206,7 @@ export function ClosetPage() {
                   tagInput.current = value
                 }}
               />
-              <button type="button" className="primary" disabled={saving || making || !resultVideo} onClick={() => void save()}>
+              <button type="button" className="primary" disabled={saving || making || !result} onClick={() => void save()}>
                 {saving ? '正在做成穿搭页的图片…' : '保存这套搭配'}
               </button>
             </div>
