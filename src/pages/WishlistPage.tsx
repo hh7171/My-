@@ -28,7 +28,7 @@ import {
   type Garment,
   type Season,
 } from '../types.ts'
-import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateOutfitVideo, generateWearPhoto, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
+import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateOutfitVideo, generateWearPhoto, nameGarment, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
 
 const stickerInflight = new Set<string>()
 const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'scarf', 'necklace', 'earrings', 'jewelry', 'bracelet', 'watch', 'hat', 'glasses', 'bag']
@@ -484,7 +484,7 @@ export function WishlistPage() {
           if (saved && profileNow?.person && stickerCurrent(saved, profileNow.updatedAt)) {
             setStickerError((current) => (current?.id === latest.id ? null : current))
           } else {
-            setStickerError({ id: latest.id, text: `${garmentLabel(latest.name)}：${wearError(cause)}` })
+            setStickerError({ id: latest.id, text: `${garmentLabel(latest.name, latest.title)}：${wearError(cause)}` })
           }
         } finally {
           releaseStickerJob(latest.id)
@@ -553,8 +553,8 @@ export function WishlistPage() {
     if (!moved) return
     setPicked((current) => (current[item.category] === item.id ? { ...current, [item.category]: undefined } : current))
     setTryOn((current) => (current[item.category] === item.id ? { ...current, [item.category]: undefined } : current))
-    const sameNumber = garmentLabel(item.name) === garmentLabel(moved.name)
-    notify(sameNumber ? `已放到${SEASON_LABEL[season]}` : `已放到${SEASON_LABEL[season]}，编号改为 ${garmentLabel(moved.name)}`)
+    const sameNumber = garmentLabel(item.name, item.title) === garmentLabel(moved.name, moved.title)
+    notify(sameNumber ? `已放到${SEASON_LABEL[season]}` : `已放到${SEASON_LABEL[season]}，编号改为 ${garmentLabel(moved.name, moved.title)}`)
   }
 
   function begin() {
@@ -600,14 +600,17 @@ export function WishlistPage() {
     const label = name.trim() || CATEGORY_LABEL[category]
     setPreparing(true)
     setUploadError('')
+    const titlePromise = nameGarment({ category, blob: pending.originalBlob })
     try {
       const flat = pending.flatLay ? pending.originalBlob : await generateFlatLay({ category, name: label, blob: pending.originalBlob })
       const product = await isolateProductCutout(flat, category)
       const color = dominantColor(await blobToCanvas(product))
       const clothing = isClothingCategory(category)
       const season = clothing ? (shelf === 'accessory' ? 'summer' : shelf) : undefined
+      const title = await titlePromise
       await addGarment({
         name: nextGarmentName(garments, 'wishlist', category, season),
+        ...(title ? { title } : {}),
         category,
         ...(season ? { season } : {}),
         status: 'wishlist',
@@ -655,7 +658,11 @@ export function WishlistPage() {
     }
     const lines = finished.map((look) => {
       const names = look.garmentIds
-        .map((id) => (id === item.id && moved ? garmentLabel(moved.name) : garmentLabel(garments.find((garment) => garment.id === id)?.name ?? '')))
+        .map((id) => {
+          if (id === item.id && moved) return garmentLabel(moved.name, moved.title)
+          const found = garments.find((garment) => garment.id === id)
+          return found ? garmentLabel(found.name, found.title) : ''
+        })
         .filter((name) => name.length > 0)
       return names.length > 0 ? names.join('、') : '这套'
     })
@@ -982,7 +989,7 @@ export function WishlistPage() {
           <BlobImg blob={pending.originalBlob} alt="待放入的衣服" className="pending-thumb" />
           <label>
             名称
-            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="只给整理平铺用，保存后按 wishlist/summer/top/top01 编号" />
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="可不填。只用来提醒白底图留哪一件，卡片上的名字会看着照片另起" />
           </label>
           <label>
             类别
@@ -1015,7 +1022,7 @@ export function WishlistPage() {
             {uploadError ? <p className="error">{uploadError}</p> : null}
             <div className="pending-actions">
               <button type="button" className="primary" onClick={() => void commit()} disabled={preparing}>
-                {preparing ? (pending.flatLay ? '正在保存…' : '正在整理成白底平铺…') : '放进想买'}
+                {preparing ? (pending.flatLay ? '正在起名并保存…' : '正在整理成白底平铺并起名…') : '放进想买'}
               </button>
               <button type="button" className="ghost" onClick={cancelUpload}>
                 取消
@@ -1044,12 +1051,12 @@ export function WishlistPage() {
                           return (
                             <article key={item.id} className={on ? 'card rail-card picked' : 'card rail-card'}>
                               <button type="button" className="rail-pick" aria-pressed={on} onClick={() => toggleOwned(item)}>
-                                <BlobImg blob={item.cutoutBlob} alt={garmentLabel(item.name)} className="thumb" />
+                                <BlobImg blob={item.cutoutBlob} alt={garmentLabel(item.name, item.title)} className="thumb" />
                                 {on ? <span className="picked-mark">已盖上</span> : null}
                                 <span className="card-meta">
                                   <span className="swatch" style={{ background: item.color }} />
                                   <span>
-                                    <strong>{garmentLabel(item.name)}</strong>
+                                    <strong>{garmentLabel(item.name, item.title)}</strong>
                                   </span>
                                 </span>
                               </button>
@@ -1090,12 +1097,12 @@ export function WishlistPage() {
                                   onDragEnd={endDrag}
                                   onClick={() => toggleWish(item)}
                                 >
-                                  <BlobImg blob={item.cutoutBlob} alt={garmentLabel(item.name)} className="thumb" />
+                                  <BlobImg blob={item.cutoutBlob} alt={garmentLabel(item.name, item.title)} className="thumb" />
                                   {on ? <span className="picked-mark">已选</span> : null}
                                   <span className="card-meta">
                                     <span className="swatch" style={{ background: item.color }} />
                                     <span>
-                                      <strong>{garmentLabel(item.name)}</strong>
+                                      <strong>{garmentLabel(item.name, item.title)}</strong>
                                     </span>
                                   </span>
                                 </button>
@@ -1123,7 +1130,7 @@ export function WishlistPage() {
                                   <button type="button" className="text-button" onClick={() => void own(item)}>
                                     我买了
                                   </button>
-                                  <button type="button" className="text-button" onClick={() => void remove(item.id, garmentLabel(item.name))}>
+                                  <button type="button" className="text-button" onClick={() => void remove(item.id, garmentLabel(item.name, item.title))}>
                                     移除
                                   </button>
                                 </div>

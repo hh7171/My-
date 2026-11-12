@@ -1,4 +1,5 @@
 import { extractWornGarment, placeJewelryCutout } from './imaging.ts'
+import { acceptGarmentTitle } from './garment-name.ts'
 import { maxGarments, type ImageTaskId } from './model-config.ts'
 import { CATEGORY_LABEL, placedJewelry, type Adjustments, type BodyMarks, type Category, type StickerFrame } from './types.ts'
 
@@ -301,6 +302,23 @@ export function flatLayPrompt(category: Category, name: string): string {
 
 export async function generateFlatLay(input: { category: Category; name: string; blob: Blob }): Promise<Blob> {
   return postWear('flatlay', flatLayPrompt(input.category, input.name), [input.blob])
+}
+
+export async function nameGarment(input: { category: Category; blob: Blob }): Promise<string> {
+  try {
+    const image = await blobToDataUrl(await flatten(input.blob, 768))
+    const response = await fetch('/api/garment-name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category: input.category, image }),
+    })
+    if (!response.ok) return ''
+    const payload = (await response.json()) as { title?: unknown }
+    return typeof payload.title === 'string' ? acceptGarmentTitle(payload.title, CATEGORY_LABEL[input.category]) : ''
+  } catch (error) {
+    console.error(error)
+    return ''
+  }
 }
 
 const FIT_PLACE: Record<Category, string> = {

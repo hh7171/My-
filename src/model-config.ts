@@ -22,6 +22,10 @@ const OUTFIT_GARMENT_CAP = 8
 
 export const IMAGE_PROVIDER: ImageProviderId = 'ark'
 
+export const ARK_NAME = {
+  model: 'glm-5.3-flash',
+}
+
 export const ARK_IMAGE = {
   // 暂时用 Seedream 5.0 flash 试效果。参考图最多 10 张，不支持组图参数。
   model: 'doubao-seedream-5.0-flash',

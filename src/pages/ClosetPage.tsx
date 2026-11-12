@@ -27,7 +27,7 @@ import { composeLookPoster } from '../look-board.tsx'
 import { TagPicker } from '../tag-picker.tsx'
 import { normalizeTag, uniqueTags } from '../tags.ts'
 import { keepSource, latestOpenSource, readSource, writeSource } from '../source-files.ts'
-import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateOutfitVideo, generateWearPhoto, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
+import { buildGarmentSticker, claimStickerJob, generateFlatLay, generateOutfitVideo, generateWearPhoto, nameGarment, releaseStickerJob, stickerJobBusy, wearError, type WearPiece } from '../wear.ts'
 
 const stickerInflight = new Set<string>()
 const STACK: Category[] = ['shoes', 'pants', 'skirt', 'dress', 'top', 'belt', 'scarf', 'necklace', 'earrings', 'jewelry', 'bracelet', 'watch', 'hat', 'glasses', 'bag']
@@ -448,8 +448,8 @@ export function ClosetPage() {
     const moved = await updateGarment(item.id, { name, season })
     if (!moved) return
     setPicked((current) => (current[item.category] === item.id ? { ...current, [item.category]: undefined } : current))
-    const sameNumber = garmentLabel(item.name) === garmentLabel(moved.name)
-    notify(sameNumber ? `已放到${SEASON_LABEL[season]}` : `已放到${SEASON_LABEL[season]}，编号改为 ${garmentLabel(moved.name)}`)
+    const sameNumber = garmentLabel(item.name, item.title) === garmentLabel(moved.name, moved.title)
+    notify(sameNumber ? `已放到${SEASON_LABEL[season]}` : `已放到${SEASON_LABEL[season]}，编号改为 ${garmentLabel(moved.name, moved.title)}`)
   }
 
   function enqueueSticker(item: Garment, manual = false) {
@@ -505,7 +505,7 @@ export function ClosetPage() {
           if (saved && profileNow?.person && stickerCurrent(saved, profileNow.updatedAt)) {
             setStickerError((current) => (current?.id === latest.id ? null : current))
           } else {
-            setStickerError({ id: latest.id, text: `${garmentLabel(latest.name)}：${wearError(cause)}` })
+            setStickerError({ id: latest.id, text: `${garmentLabel(latest.name, latest.title)}：${wearError(cause)}` })
           }
         } finally {
           releaseStickerJob(latest.id)
@@ -561,6 +561,7 @@ export function ClosetPage() {
     const label = name.trim() || CATEGORY_LABEL[categoryValue]
     setFiling(true)
     setUploadError('')
+    const titlePromise = nameGarment({ category: categoryValue, blob: pending.originalBlob })
     let product = pending.originalBlob
     let saved: Garment
     try {
@@ -568,8 +569,10 @@ export function ClosetPage() {
       product = await isolateProductCutout(product, categoryValue)
       const color = dominantColor(await blobToCanvas(product))
       const season = shelf === 'accessory' ? undefined : shelf
+      const title = await titlePromise
       saved = await addGarment({
         name: nextGarmentName(garments, 'owned', categoryValue, season),
+        ...(title ? { title } : {}),
         category: categoryValue,
         ...(season ? { season } : {}),
         status: 'owned',
@@ -623,7 +626,7 @@ export function ClosetPage() {
         setStickerError((current) => (current?.id === saved.id ? null : current))
         notify(placedJewelry(categoryValue) ? '已放进衣橱，按位置摆到模特身上了' : '已放进衣橱，贴合图层按这个人的身材做好了')
       } else {
-        setUploadError(`${garmentLabel(saved.name)}：${wearError(cause)}`)
+        setUploadError(`${garmentLabel(saved.name, saved.title)}：${wearError(cause)}`)
         notify(placedJewelry(categoryValue) ? '首饰已放进衣橱，这次没摆上去' : '衣服已放进衣橱，贴合图层这次没做成')
       }
     } finally {
@@ -930,7 +933,7 @@ export function ClosetPage() {
           <BlobImg blob={pending.originalBlob} alt="待放入的衣服" className="pending-thumb" />
           <label>
             名称
-            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="只给整理平铺用，保存后按 summer/top/top01 编号" />
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="可不填。只用来提醒白底图留哪一件，卡片上的名字会看着照片另起" />
           </label>
           <label>
             类别
@@ -964,7 +967,7 @@ export function ClosetPage() {
             {uploadError ? <p className="error">{uploadError}</p> : null}
             <div className="pending-actions">
               <button type="button" className="primary" onClick={() => void commit()} disabled={Boolean(sticking) || filing}>
-                {filing ? (pending.flatLay ? '正在保存…' : '正在整理成白底平铺…') : sticking ? (placedJewelry(categoryValue) ? '正在摆到身上…' : '正在生成贴合图层…') : '放进衣橱'}
+                {filing ? (pending.flatLay ? '正在起名并保存…' : '正在整理成白底平铺并起名…') : sticking ? (placedJewelry(categoryValue) ? '正在摆到身上…' : '正在生成贴合图层…') : '放进衣橱'}
               </button>
               <button type="button" className="ghost" onClick={cancel}>
                 取消
@@ -1002,12 +1005,12 @@ export function ClosetPage() {
                           onDragEnd={endDrag}
                           onClick={() => toggle(item)}
                         >
-                          <BlobImg blob={item.cutoutBlob} alt={garmentLabel(item.name)} className="thumb" />
+                          <BlobImg blob={item.cutoutBlob} alt={garmentLabel(item.name, item.title)} className="thumb" />
                           {selected ? <span className="picked-mark">已选</span> : null}
                           <span className="card-meta">
                             <span className="swatch" style={{ background: item.color }} />
                             <span>
-                              <strong>{garmentLabel(item.name)}</strong>
+                              <strong>{garmentLabel(item.name, item.title)}</strong>
                             </span>
                           </span>
                         </button>
@@ -1032,7 +1035,7 @@ export function ClosetPage() {
                                     : '做成贴合图层'}
                             </button>
                           ) : null}
-                          <button type="button" className="text-button" onClick={() => void remove(item.id, garmentLabel(item.name))}>
+                          <button type="button" className="text-button" onClick={() => void remove(item.id, garmentLabel(item.name, item.title))}>
                             移除
                           </button>
                         </div>

@@ -13,9 +13,30 @@ export function isGarmentDir(value: string): boolean {
   return GARMENT_DIR.test(value)
 }
 
-export function garmentLabel(name: string): string {
+export function garmentLabel(name: string, title?: string): string {
+  const shown = title?.trim()
+  if (shown) return shown
   const slash = name.lastIndexOf('/')
   return slash === -1 ? name : name.slice(slash + 1)
+}
+
+export function garmentNamePrompt(categoryLabel: string): string {
+  return [
+    `图中是一件已经选定类别的单品，类别是「${categoryLabel}」。`,
+    '只给这一件起一个 2 到 6 个字的中文名字，风格类似「豹纹裤」「JK裙」「微喇裤」「卡其色短裤」「做旧色短裙」。',
+    '名字要让人看出颜色、花纹或版型。不要只写类别。',
+    '不要解释，不要标点，只返回名字。',
+  ].join('\n')
+}
+
+export function acceptGarmentTitle(raw: string, categoryLabel?: string): string {
+  const compact = raw
+    .trim()
+    .replace(/^名字[:：]?/, '')
+    .replace(/[\s「」"'“”‘’。，、！？!?,.：:（）()【】[\]\-—]/g, '')
+  if (!/^[\u4e00-\u9fffA-Za-z0-9]{2,8}$/.test(compact)) return ''
+  if (categoryLabel && compact === categoryLabel) return ''
+  return compact
 }
 
 export function addedOrder<T extends { id: string; createdAt: number }>(items: T[]): T[] {

@@ -4,10 +4,13 @@ import react from '@vitejs/plugin-react'
 import { defineConfig, loadEnv, type Plugin } from 'vite'
 import { parseClothRgb } from './cloth-parser.ts'
 import { createLibrary } from './library-server.ts'
-import { ARK_IMAGE, ARK_TASK_SIZE, ARK_VIDEO, IMAGE_PROVIDER, OPENROUTER_TASKS, imageTask, maxGarments, maxReferences } from './src/model-config.ts'
+import { acceptGarmentTitle, garmentNamePrompt } from './src/garment-name.ts'
+import { ARK_IMAGE, ARK_NAME, ARK_TASK_SIZE, ARK_VIDEO, IMAGE_PROVIDER, OPENROUTER_TASKS, imageTask, maxGarments, maxReferences } from './src/model-config.ts'
+import { CATEGORY_LABEL, type Category } from './src/types.ts'
 
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/images'
 const ARK_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/plan/v3/images/generations'
+const ARK_CHAT_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions'
 const ARK_VIDEO_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/plan/v3/contents/generations/tasks'
 
 type ImageResponse = {
@@ -15,7 +18,7 @@ type ImageResponse = {
   data?: { b64_json?: string; url?: string; media_type?: string }[]
 }
 
-function readJson(req: IncomingMessage): Promise<{ task?: string; prompt?: string; images?: string[]; rgb?: string; image?: string }> {
+function readJson(req: IncomingMessage): Promise<{ task?: string; prompt?: string; images?: string[]; rgb?: string; image?: string; category?: string }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     req.on('data', (chunk: Buffer | string) => {
@@ -259,6 +262,72 @@ async function arkOutfitVideo(apiKey: string, image: string): Promise<Buffer> {
   throw new Error('展示视频等太久了')
 }
 
+function isCategory(value: string): value is Category {
+  return Object.prototype.hasOwnProperty.call(CATEGORY_LABEL, value)
+}
+
+async function handleGarmentName(apiKey: string, req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== 'POST') {
+    sendText(res, 405, '只接受 POST')
+    return
+  }
+  if (!apiKey) {
+    sendText(res, 401, '还没有设置火山方舟 API Key。请把 Agent Plan 的专属 Key 填进项目根目录 .env 的 ARK_API_KEY，保存后重新运行 npm run dev。')
+    return
+  }
+  try {
+    const body = await readJson(req)
+    const category = typeof body.category === 'string' ? body.category : ''
+    const image = typeof body.image === 'string' ? body.image : ''
+    if (!isCategory(category) || !image.startsWith('data:image/')) {
+      sendText(res, 400, '缺少单品类别或照片')
+      return
+    }
+    const label = CATEGORY_LABEL[category]
+    const upstream = await fetch(ARK_CHAT_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal: AbortSignal.timeout(45_000),
+      body: JSON.stringify({
+        model: ARK_NAME.model,
+        thinking: { type: 'enabled' },
+        reasoning_effort: 'low',
+        max_tokens: 512,
+        temperature: 0.3,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url: image } },
+              { type: 'text', text: garmentNamePrompt(label) },
+            ],
+          },
+        ],
+      }),
+    })
+    const payload = (await upstream.json()) as {
+      error?: { message?: string }
+      choices?: { message?: { content?: string | null } }[]
+    }
+    if (!upstream.ok) {
+      const message = payload.error?.message || '这次没有起出名字'
+      console.error('garment name upstream', upstream.status, message.slice(0, 180))
+      sendText(res, 502, '这次没有起出名字')
+      return
+    }
+    const content = payload.choices?.[0]?.message?.content ?? ''
+    res.statusCode = 200
+    res.setHeader('Content-Type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify({ title: acceptGarmentTitle(content, label) }))
+  } catch (error) {
+    console.error('garment name failed', error instanceof Error ? error.message : error)
+    sendText(res, 502, '这次没有起出名字')
+  }
+}
+
 async function handleWearVideo(apiKey: string, req: IncomingMessage, res: ServerResponse) {
   if (req.method !== 'POST') {
     sendText(res, 405, '只接受 POST')
@@ -289,6 +358,10 @@ function wanPlugin(apiKey: string): Plugin {
     const url = req.url?.split('?')[0]
     if (url === '/api/wear-video') {
       void handleWearVideo(apiKey, req, res)
+      return
+    }
+    if (url === '/api/garment-name') {
+      void handleGarmentName(apiKey, req, res)
       return
     }
     if (url !== '/api/wear') {

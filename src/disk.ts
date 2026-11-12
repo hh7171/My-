@@ -1,8 +1,9 @@
 import { loadAccount, loadBody, loadDiskStamp, loadGarments, loadLooks, removeGarment, removeLook, saveAccount, saveBody, saveDiskStamp, deleteBody, putGarment, putLook, type DiskStamp } from './db.ts'
 import { imageType, isLibraryId, LIBRARY_BLOBS, LIBRARY_REQUIRED, markOf, type LibraryIndex, type LibraryKind, type LibraryWriteResult, type StoredRecord } from './library-mark.ts'
 import { uniqueTags } from './tags.ts'
+import { acceptGarmentTitle } from './garment-name.ts'
 import type { Account, Adjustments, BodyMarks, BodyProfile, BodyType, Category, Garment, Look, Season, StickerFrame, StickerPlace } from './types.ts'
-import { CATEGORY_ORDER } from './types.ts'
+import { CATEGORY_LABEL, CATEGORY_ORDER } from './types.ts'
 
 export type OpenSnapshot = {
   account: Account | null
@@ -557,6 +558,10 @@ function asGarment(record: Record<string, unknown>, cutoutBlob: Blob, stickerBlo
   }
   if (originalBlob) garment.originalBlob = originalBlob
   if (typeof record.userId === 'string') garment.userId = record.userId
+  if (typeof record.title === 'string') {
+    const title = acceptGarmentTitle(record.title, CATEGORY_LABEL[category])
+    if (title) garment.title = title
+  }
   if (record.season != null) {
     if (!isSeason(record.season)) throw new Error('衣服读不出来')
     garment.season = record.season

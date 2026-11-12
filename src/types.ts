@@ -93,6 +93,7 @@ export type Garment = {
   id: string
   userId?: string
   name: string
+  title?: string
   category: Category
   status: GarmentStatus
   season?: Season

@@ -219,8 +219,8 @@ export function LooksPage() {
           {visible.map((look) => {
             const names = look.garmentIds
               .map((id) => {
-                const name = garments.find((item) => item.id === id)?.name
-                return name ? garmentLabel(name) : undefined
+                const item = garments.find((garment) => garment.id === id)
+                return item ? garmentLabel(item.name, item.title) : undefined
               })
               .filter((name): name is string => Boolean(name))
             const showingReal = Boolean(look.showReal && look.realBlob)
